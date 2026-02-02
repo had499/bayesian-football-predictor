@@ -2,6 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Install system dependencies for PyTensor/PyMC
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    g++ \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy requirements
 COPY requirements.txt .
 
@@ -14,6 +20,9 @@ COPY services/predictor/predictor.py ./services/predictor/
 
 # Create data directory for model persistence
 RUN mkdir -p data
+
+# Set Python path to include src directory
+ENV PYTHONPATH=/app/src:$PYTHONPATH
 
 # Expose port
 EXPOSE 8956

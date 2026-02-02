@@ -1,5 +1,9 @@
 import sys
-sys.path.append('/users/hadiahmed/documents/projects/football-predictor/src')
+import os
+from pathlib import Path
+
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
