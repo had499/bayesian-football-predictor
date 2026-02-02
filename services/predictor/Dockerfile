@@ -14,12 +14,12 @@ COPY requirements.txt .
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
-COPY src/ ./src/
-COPY services/predictor/predictor.py ./services/predictor/
+# Copy source code (copy entire src with all subdirectories)
+COPY src/ /app/src/
+COPY services/predictor/predictor.py /app/
 
 # Create data directory for model persistence
-RUN mkdir -p data
+RUN mkdir -p /app/data
 
 # Set Python path to include src directory
 ENV PYTHONPATH=/app/src:$PYTHONPATH
@@ -28,4 +28,4 @@ ENV PYTHONPATH=/app/src:$PYTHONPATH
 EXPOSE 8956
 
 # Run the application
-CMD ["python", "services/predictor/predictor.py"]
+CMD ["python", "/app/predictor.py"]
