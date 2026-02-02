@@ -8,24 +8,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
+# Copy package files
+COPY setup.py .
+COPY src/ ./src/
 COPY requirements.txt .
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install the package and dependencies
+RUN pip install --no-cache-dir -e . && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy source code (copy entire src with all subdirectories)
-COPY src/ /app/src/
-COPY services/predictor/predictor.py /app/
+# Copy application
+COPY services/predictor/predictor.py .
 
-# Create data directory for model persistence
-RUN mkdir -p /app/data
+# Create data directory
+RUN mkdir -p data
 
-# Set Python path to include src directory
-ENV PYTHONPATH=/app/src:$PYTHONPATH
-
-# Expose port
 EXPOSE 8956
 
-# Run the application
-CMD ["python", "/app/predictor.py"]
+CMD ["python", "predictor.py"]
