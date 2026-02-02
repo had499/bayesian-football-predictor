@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  predictor-api:
+    build:
+      context: ../..
+      dockerfile: services/predictor/Dockerfile
+    ports:
+      - "8956:8956"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped

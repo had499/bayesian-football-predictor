@@ -1,0 +1,14 @@
+pandas
+understatapi==0.7.0
+numpy
+requests
+matplotlib
+scipy
+arviz
+seaborn
+scikit-learn
+jupyter
+pymc
+fastapi
+uvicorn[standard]
+pydantic
