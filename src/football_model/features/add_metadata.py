@@ -31,9 +31,21 @@ def add_rounds_to_data(df):
     # Compute ISO week
     df['round'] = df['dt_round'].dt.isocalendar().week
 
+    # Store season before groupby operations
+    season_col = df['season'].copy()
+    
     df = df.groupby('season', group_keys=False).apply(adjust_round)
+    
+    # Restore season column if it was lost
+    if 'season' not in df.columns:
+        df['season'] = season_col
+    
     df = df.drop(columns='dt_round')
     df = df.groupby('season', group_keys=False).apply(make_rounds_consecutive)
+    
+    # Restore season column again if needed
+    if 'season' not in df.columns:
+        df['season'] = season_col
 
     # Now compute cumulative rounds
     season_max_rounds = df.groupby('season')['round'].max().sort_index()

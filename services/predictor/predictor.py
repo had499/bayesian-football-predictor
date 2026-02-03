@@ -179,21 +179,23 @@ async def train_model(request: TrainRequest):
             "n_matches": len(input_model_data.goals_home)
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Full error traceback:\n{error_details}")
         raise HTTPException(status_code=500, detail=f"Training failed: {str(e)}")
 
 
 @app.get("/predict", response_model=PredictionResponse)
 async def get_predictions():
     """
-    Get predictions for the latest round using the saved trace.
-    """
-    try:
-        # Load trace and saved training data
-        if not TRACE_PATH.exists():
-            raise HTTPException(
-                status_code=404,
-                detail="No trained model found. Please train the model first using /train endpoint."
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Training failed: {str(e)}")g /train endpoint."
             )
         
         with open(TRACE_PATH, 'rb') as f:

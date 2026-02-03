@@ -1,9 +1,10 @@
-*.__pycache__
+__pycache__/
 *.py[cod]
 *$py.class 
 *.DS_Store
 
 # Model artifacts - too large for git
-data/
+/data/
+/services/predictor/data/
 *.pkl
 *.nc
