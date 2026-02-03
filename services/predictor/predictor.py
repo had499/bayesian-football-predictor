@@ -202,11 +202,9 @@ async def get_predictions():
         with open(MODEL_DATA_PATH, 'rb') as f:
             train_model_data = pickle.load(f)
         
-        # Fetch fresh data from API
-        df = get_understat_data(leagues=['EPL'], years=['2025'])
-        df = add_rounds_to_data(df)
-        df = add_match_ids(df)
-        df = add_home_away_goals_xg(df)
+        # Load the saved dataframe from training instead of fetching fresh
+        with open(DATAFRAME_PATH, 'rb') as f:
+            df = pickle.load(f)
         
 
         past_matches = df[df['datetime'] <= datetime.today()]
