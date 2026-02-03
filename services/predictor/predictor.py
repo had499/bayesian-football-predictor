@@ -227,7 +227,7 @@ async def get_predictions():
             next_round = cur_round
         
         # Prepare model data including the prediction round
-            pred_model_data = prepare_model_data(df, max_round=next_round)
+        pred_model_data = prepare_model_data(df, max_round=next_round)
         
         # Filter to just matches in the prediction round
         pred_mask = pred_model_data.t_idx == next_round
