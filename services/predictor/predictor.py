@@ -37,12 +37,13 @@ app.add_middleware(
 )
 
 # Storage paths
-TRACE_PATH = Path("data/trace.pkl")
-MODEL_DATA_PATH = Path("data/model_data.pkl")
-DATAFRAME_PATH = Path("data/dataframe.pkl")
+DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+TRACE_PATH = DATA_DIR / "trace.pkl"
+MODEL_DATA_PATH = DATA_DIR / "model_data.pkl"
+DATAFRAME_PATH = DATA_DIR / "dataframe.pkl"
 
 # Ensure data directory exists
-TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Rate limiting
 RATE_LIMIT_WINDOW = 60  # seconds
