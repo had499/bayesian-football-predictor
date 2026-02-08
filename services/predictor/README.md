@@ -6,7 +6,7 @@
 
 ```bash
 cd services/predictor
-docker-compose up --build
+docker compose up --build
 ```
 
 The API will be available at http://localhost:8956
