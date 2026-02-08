@@ -301,9 +301,17 @@ async def get_predictions():
             lambda_home_samples = np.exp(home_attack_samples - away_defense_samples + home_advantage_samples)
             lambda_away_samples = np.exp(away_attack_samples - home_defense_samples)
             
-            # Sample goals from Poisson distributions
-            goals_home_samples = np.random.poisson(lambda_home_samples)
-            goals_away_samples = np.random.poisson(lambda_away_samples)
+            # Clip extreme values to prevent overflow
+            lambda_home_samples = np.clip(lambda_home_samples, 0.01, 10)
+            lambda_away_samples = np.clip(lambda_away_samples, 0.01, 10)
+            
+            # Use fewer samples for Poisson sampling (subsample for efficiency)
+            n_samples = min(1000, len(lambda_home_samples))
+            indices = np.random.choice(len(lambda_home_samples), n_samples, replace=False)
+            
+            # Sample goals from Poisson distributions (using subsampled lambdas)
+            goals_home_samples = np.random.poisson(lambda_home_samples[indices])
+            goals_away_samples = np.random.poisson(lambda_away_samples[indices])
             
             # Calculate outcome probabilities
             home_wins = (goals_home_samples > goals_away_samples).mean()
