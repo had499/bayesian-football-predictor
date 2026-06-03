@@ -106,6 +106,21 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
             else:
                 attack = pm.Deterministic('attack',att_0 + att_rw)
                 defense = pm.Deterministic('defence',def_0 + def_rw)
+
+        # --- Soft identifiability constraint (only when uncentered) ---
+        # Without centering, the model is weakly identified in a "drift" direction:
+        # adding a constant to both attack and defence leaves (attack - defence) unchanged.
+        # This can cause NUTS mass-matrix adaptation to blow up and hang.
+        if (not config.center_team_strength) and getattr(config, "soft_center_team_strength", False):
+            sc_sd = float(getattr(config, "soft_center_sd", 1.0))
+            pm.Potential(
+                "soft_center_attack",
+                pm.logp(pm.Normal.dist(mu=0.0, sigma=sc_sd), attack.mean(axis=1)).sum(),
+            )
+            pm.Potential(
+                "soft_center_defence",
+                pm.logp(pm.Normal.dist(mu=0.0, sigma=sc_sd), defense.mean(axis=1)).sum(),
+            )
         
         home_adv = home_advantage_prior(data.n_teams,  config.home_mu, config.home_sd, config.home_adv_sd)
             

@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -18,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import time
 from collections import defaultdict
+import threading
 
 from football_model.data.get_data import get_understat_data
 from football_model.features.add_metadata import add_rounds_to_data, add_home_away_goals_xg, add_match_ids
@@ -41,6 +43,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 TRACE_PATH = DATA_DIR / "trace.pkl"
 MODEL_DATA_PATH = DATA_DIR / "model_data.pkl"
 DATAFRAME_PATH = DATA_DIR / "dataframe.pkl"
+GAMEWEEKS_DIR = DATA_DIR / "gameweeks"
 
 # Ensure data directory exists
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -67,9 +70,12 @@ def check_rate_limit(client_id: str):
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    """Apply rate limiting to all requests"""
+    """Apply rate limiting to all requests except static gameweeks endpoints"""
+    if request.url.path.startswith("/gameweeks"):
+        return await call_next(request)
+
     client_id = request.client.host
-    
+
     if not check_rate_limit(client_id):
         return JSONResponse(
             status_code=429,
@@ -77,7 +83,7 @@ async def rate_limit_middleware(request: Request, call_next):
                 "detail": f"Rate limit exceeded. Maximum {MAX_REQUESTS_PER_WINDOW} requests per {RATE_LIMIT_WINDOW} seconds."
             }
         )
-    
+
     response = await call_next(request)
     return response
 
@@ -91,6 +97,8 @@ class TrainRequest(BaseModel):
     target_accept: float = 0.97
     clip_theta: float = 5.0
     center_team_strength: bool = False
+    soft_center_team_strength: bool = True
+    soft_center_sd: float = 1.0
 
 
 class PredictionResponse(BaseModel):
@@ -121,21 +129,24 @@ async def train_model(request: TrainRequest):
         past_matches = df[df['datetime'] <= datetime.today()]
         future_matches = df[df['datetime'] > datetime.today()]
 
+        if future_matches.empty:
+            raise HTTPException(status_code=400, detail="Season complete — no upcoming matches to predict.")
+
         cur_round = past_matches['round'].max()
 
         if cur_round in future_matches['round'].values:
             round_over = False
         else:
             round_over = True
-        
+
         # If we're in the middle of a round, that is round we want to predict next
         if round_over:
             next_round = cur_round + 1
         # If the current round is ongoing, we want to predict this round
         else:
             next_round = cur_round
-            
-        
+
+
         # Prepare model data
         input_model_data = prepare_model_data(df, max_round=next_round - 1)
         
@@ -143,6 +154,8 @@ async def train_model(request: TrainRequest):
         config = ModelConfig(
             clip_theta=request.clip_theta,
             center_team_strength=request.center_team_strength,
+            soft_center_team_strength=request.soft_center_team_strength,
+            soft_center_sd=request.soft_center_sd,
         )
         
         # Build the model
@@ -150,16 +163,33 @@ async def train_model(request: TrainRequest):
         
         # Sample
         with model:
-            trace = pm.sample(
-                draws=request.samples,
-                tune=request.tune,
-                chains=request.chains,
-                target_accept=request.target_accept,
-                random_seed=42,
-                idata_kwargs={"log_likelihood": True},
-                return_inferencedata=True,
-                discard_tuned_samples=True
+            started_at = time.time()
+            stop_event = threading.Event()
+
+            def _heartbeat():
+                while not stop_event.wait(30):
+                    elapsed = time.time() - started_at
+                    print(f"[train] still sampling... {elapsed:.0f}s elapsed")
+
+            threading.Thread(target=_heartbeat, daemon=True).start()
+            print(
+                f"[train] starting NUTS: draws={request.samples} tune={request.tune} chains={request.chains} "
+                f"target_accept={request.target_accept} center={request.center_team_strength} "
+                f"soft_center={request.soft_center_team_strength} soft_center_sd={request.soft_center_sd}"
             )
+            try:
+                trace = pm.sample(
+                    draws=request.samples,
+                    tune=request.tune,
+                    chains=request.chains,
+                    target_accept=request.target_accept,
+                    random_seed=42,
+                    idata_kwargs={"log_likelihood": True},
+                    return_inferencedata=True,
+                    discard_tuned_samples=True
+                )
+            finally:
+                stop_event.set()
         
         # Save trace, model data, and dataframe
         with open(TRACE_PATH, 'wb') as f:
@@ -215,20 +245,23 @@ async def get_predictions():
         past_matches = df[df['datetime'] <= datetime.today()]
         future_matches = df[df['datetime'] > datetime.today()]
 
+        if future_matches.empty:
+            raise HTTPException(status_code=400, detail="Season complete — no upcoming matches to predict.")
+
         cur_round = past_matches['round'].max()
 
         if cur_round in future_matches['round'].values:
             round_over = False
         else:
             round_over = True
-        
+
         # If we're in the middle of a round, that is round we want to predict next
         if round_over:
             next_round = cur_round + 1
         # If the current round is ongoing, we want to predict this round
         else:
             next_round = cur_round
-        
+
         # Prepare model data including the prediction round
         pred_model_data = prepare_model_data(df, max_round=next_round)
         
@@ -375,6 +408,54 @@ async def get_status():
         "trace_path": str(TRACE_PATH),
         "last_modified": datetime.fromtimestamp(TRACE_PATH.stat().st_mtime).isoformat() if TRACE_PATH.exists() else None
     }
+
+
+@app.get("/gameweeks")
+async def list_gameweeks():
+    """List all rounds that have pre-computed data available."""
+    if not GAMEWEEKS_DIR.exists():
+        return {"rounds": []}
+
+    rounds = []
+    for round_dir in sorted(GAMEWEEKS_DIR.iterdir()):
+        if not round_dir.is_dir() or not round_dir.name.startswith("round_"):
+            continue
+        round_num = int(round_dir.name.split("_")[1])
+        rounds.append({
+            "round": round_num,
+            "has_predictions": (round_dir / "predictions.json").exists(),
+            "has_actuals": (round_dir / "actuals.json").exists(),
+            "has_team_strengths": (round_dir / "team_strengths.json").exists(),
+        })
+
+    return {"rounds": rounds}
+
+
+@app.get("/gameweeks/{round_num}/predictions")
+async def get_gameweek_predictions(round_num: int):
+    path = GAMEWEEKS_DIR / f"round_{round_num}" / "predictions.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"No predictions found for round {round_num}")
+    with open(path) as f:
+        return json.load(f)
+
+
+@app.get("/gameweeks/{round_num}/actuals")
+async def get_gameweek_actuals(round_num: int):
+    path = GAMEWEEKS_DIR / f"round_{round_num}" / "actuals.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"No actuals found for round {round_num}")
+    with open(path) as f:
+        return json.load(f)
+
+
+@app.get("/gameweeks/{round_num}/team_strengths")
+async def get_gameweek_team_strengths(round_num: int):
+    path = GAMEWEEKS_DIR / f"round_{round_num}" / "team_strengths.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"No team strengths found for round {round_num}")
+    with open(path) as f:
+        return json.load(f)
 
 
 if __name__ == "__main__":

@@ -86,6 +86,8 @@ class ModelConfig:
     # Model options
     # -------------------------
     center_team_strength: bool = True  # center team strengths at each time point
+    soft_center_team_strength: bool = True  # if not centering, softly pin per-time means near 0 to avoid drift
+    soft_center_sd: float = 1.0        # strength of soft-centering (larger = weaker)
     likelihood: str = "negbin"      # "poisson" or "negbin"
     use_xG: bool = False            # include xG as weighted feature (default: False)
     clip_theta: float = 2.0         # soft clip parameter
