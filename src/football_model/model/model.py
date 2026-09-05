@@ -41,6 +41,9 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
                 data.n_teams,
                 sigma_att_ability,
                 rho_att_ability,
+                active_mask=data.active_mask,
+                season_start_mask=data.season_start_mask,
+                season_start_sigma_mult=config.season_start_sigma_mult,
             )
             def_ability = ar1_team_process(
                 "def_ability",
@@ -48,8 +51,11 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
                 data.n_teams,
                 sigma_def_ability,
                 rho_def_ability,
+                active_mask=data.active_mask,
+                season_start_mask=data.season_start_mask,
+                season_start_sigma_mult=config.season_start_sigma_mult,
             )
-            
+
             # Form processes (volatile short-term fluctuations)
             att_form = ar1_team_process(
                 "att_form",
@@ -57,6 +63,9 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
                 data.n_teams,
                 sigma_att_form,
                 rho_att_form,
+                active_mask=data.active_mask,
+                season_start_mask=data.season_start_mask,
+                season_start_sigma_mult=config.season_start_sigma_mult,
             )
             def_form = ar1_team_process(
                 "def_form",
@@ -64,12 +73,15 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
                 data.n_teams,
                 sigma_def_form,
                 rho_def_form,
+                active_mask=data.active_mask,
+                season_start_mask=data.season_start_mask,
+                season_start_sigma_mult=config.season_start_sigma_mult,
             )
-            
+
             # Total strength = initial + ability + form
             if config.center_team_strength:
-                attack = centered_over_teams(att_0 + att_ability + att_form, "attack")
-                defense = centered_over_teams(def_0 + def_ability + def_form, "defense")
+                attack = centered_over_teams(att_0 + att_ability + att_form, "attack", active_mask=data.active_mask)
+                defense = centered_over_teams(def_0 + def_ability + def_form, "defence", active_mask=data.active_mask)
             else:
                 attack = pm.Deterministic('attack', att_0 + att_ability + att_form)
                 defense = pm.Deterministic('defence', def_0 + def_ability + def_form)
@@ -92,6 +104,9 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
                 data.n_teams,
                 sigma_att,
                 rho_att,
+                active_mask=data.active_mask,
+                season_start_mask=data.season_start_mask,
+                season_start_sigma_mult=config.season_start_sigma_mult,
             )
             def_rw = ar1_team_process(
                 "def_rw",
@@ -99,10 +114,13 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
                 data.n_teams,
                 sigma_def,
                 rho_def,
+                active_mask=data.active_mask,
+                season_start_mask=data.season_start_mask,
+                season_start_sigma_mult=config.season_start_sigma_mult,
             )
             if config.center_team_strength == True:
-                attack = centered_over_teams(att_0 + att_rw, "attack")
-                defense = centered_over_teams(def_0 + def_rw, "defense")
+                attack = centered_over_teams(att_0 + att_rw, "attack", active_mask=data.active_mask)
+                defense = centered_over_teams(def_0 + def_rw, "defence", active_mask=data.active_mask)
             else:
                 attack = pm.Deterministic('attack',att_0 + att_rw)
                 defense = pm.Deterministic('defence',def_0 + def_rw)
@@ -113,13 +131,16 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
         # This can cause NUTS mass-matrix adaptation to blow up and hang.
         if (not config.center_team_strength) and getattr(config, "soft_center_team_strength", False):
             sc_sd = float(getattr(config, "soft_center_sd", 1.0))
+            # Mean over currently-active teams only — otherwise relegated
+            # teams' frozen values would pin the "average team = 0" anchor
+            # away from the teams actually competing that round.
             pm.Potential(
                 "soft_center_attack",
-                pm.logp(pm.Normal.dist(mu=0.0, sigma=sc_sd), attack.mean(axis=1)).sum(),
+                pm.logp(pm.Normal.dist(mu=0.0, sigma=sc_sd), masked_mean_over_teams(attack, data.active_mask)).sum(),
             )
             pm.Potential(
                 "soft_center_defence",
-                pm.logp(pm.Normal.dist(mu=0.0, sigma=sc_sd), defense.mean(axis=1)).sum(),
+                pm.logp(pm.Normal.dist(mu=0.0, sigma=sc_sd), masked_mean_over_teams(defense, data.active_mask)).sum(),
             )
         
         home_adv = home_advantage_prior(data.n_teams,  config.home_mu, config.home_sd, config.home_adv_sd)
@@ -199,5 +220,11 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
             mu=lambda_away,
             observed=data.goals_away,
         )
+
+        # --- Optional: Dixon-Coles low-score correlation correction ---
+        if config.use_dixon_coles:
+            dixon_coles_adjustment(
+                lambda_home, lambda_away, data.goals_home, data.goals_away, config.rho_dc_sd
+            )
 
     return model

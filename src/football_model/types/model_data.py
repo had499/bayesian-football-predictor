@@ -26,6 +26,10 @@ class ModelData:
     # --- team mapping ---
     team_mapping: dict = None  # maps team name -> index
 
+    # --- multi-season bookkeeping ---
+    active_mask: np.ndarray = None        # shape=(n_time, n_teams); 1 if team is in the league at time t, else 0
+    season_start_mask: np.ndarray = None  # shape=(n_time,); 1 if t falls in a season's opening window
+
 from dataclasses import dataclass
 
 @dataclass(frozen=True)
@@ -92,3 +96,15 @@ class ModelConfig:
     use_xG: bool = False            # include xG as weighted feature (default: False)
     clip_theta: float = 2.0         # soft clip parameter
     init_scale: float = 0.2         # initial scale for AR1 / team strengths
+
+    # -------------------------
+    # Multi-season handling
+    # -------------------------
+    season_start_window: int = 5          # rounds at the start of each season treated as high-uncertainty
+    season_start_sigma_mult: float = 3.0  # multiplier on sigma_att/sigma_def during that window
+
+    # -------------------------
+    # Dixon-Coles low-score correlation correction
+    # -------------------------
+    use_dixon_coles: bool = False   # correct 0-0/1-0/0-1/1-1 for home/away goal correlation
+    rho_dc_sd: float = 0.1          # prior scale for the learned correlation parameter
