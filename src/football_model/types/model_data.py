@@ -43,7 +43,17 @@ class ModelConfig:
     rho_att_beta: float = 1.0       # beta prior beta for attack AR1
     rho_def_alpha: float = 29.0     # beta prior alpha for defense AR1 (Beta(29,1) → rho~0.97)
     rho_def_beta: float = 1.0       # beta prior beta for defense AR1
-    
+
+    # -------------------------
+    # Per-team sigma (WP006, partial pooling)
+    # -------------------------
+    # When True, sigma_att/sigma_def above are reinterpreted as the scale of
+    # a population-level HalfNormal hyperprior that each team's own sigma is
+    # partially pooled toward (ar1_hierarchical_sigma in priors.py), instead
+    # of being the one global innovation SD every team shares. Only affects
+    # the standard (non-form-decomposition) AR1 branch in build_model.
+    use_per_team_sigma: bool = False
+
     # -------------------------
     # Form decomposition (ability + form)
     # -------------------------

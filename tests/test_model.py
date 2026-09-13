@@ -86,6 +86,44 @@ def test_dixon_coles_enabled_builds_and_samples(two_season_model_data):
     assert np.isfinite(trace.posterior["rho_dc"].values).all()
 
 
+def test_use_per_team_sigma_registers_hierarchical_priors_not_global_scalar(two_season_model_data):
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True,
+                          use_per_team_sigma=True)
+    model = build_model(two_season_model_data, config)
+    free_names = {rv.name for rv in model.free_RVs}
+    det_names = {d.name for d in model.deterministics}
+    # per-team hierarchical names present, the old global-scalar names absent
+    assert {"sigma_att_pop", "sigma_att_team_raw", "sigma_def_pop", "sigma_def_team_raw"} <= free_names
+    assert {"sigma_att_team", "sigma_def_team"} <= det_names
+    assert "sigma_att" not in free_names and "sigma_def" not in free_names
+
+
+def test_use_per_team_sigma_false_keeps_original_global_scalar_priors(two_season_model_data):
+    """Default behaviour (every config before WP006) must be unchanged."""
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True,
+                          use_per_team_sigma=False)
+    model = build_model(two_season_model_data, config)
+    free_names = {rv.name for rv in model.free_RVs}
+    assert {"sigma_att", "sigma_def"} <= free_names
+    assert "sigma_att_pop" not in free_names and "sigma_att_team_raw" not in free_names
+
+
+def test_use_per_team_sigma_builds_and_samples(two_season_model_data):
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True,
+                          use_per_team_sigma=True)
+    model = build_model(two_season_model_data, config)
+    with model:
+        idata = pm.sample_prior_predictive(draws=3, random_seed=0)
+    assert np.isfinite(idata.prior["lambda_home"].values).all()
+    assert idata.prior["sigma_att_team"].shape[-1] == two_season_model_data.n_teams
+
+    with model:
+        trace = pm.sample(draws=3, tune=3, chains=1, cores=1, progressbar=False, random_seed=0)
+    assert np.isfinite(trace.posterior["lambda_home"].values).all()
+    assert np.isfinite(trace.posterior["sigma_att_team"].values).all()
+    assert (trace.posterior["sigma_att_team"].values > 0).all()
+
+
 def test_form_decomposition_branch_builds(two_season_model_data):
     config = ModelConfig(use_form_decomposition=True, center_team_strength=False,
                           soft_center_team_strength=True)

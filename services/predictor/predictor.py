@@ -25,6 +25,7 @@ from football_model.data.get_data import get_understat_data
 from football_model.features.add_metadata import add_rounds_to_data, add_home_away_goals_xg, add_match_ids
 from football_model.data.prepare_model_data import prepare_model_data
 from football_model.model.model import build_model
+from football_model.model.predict import predict_match_lambdas
 from football_model.types.model_data import ModelConfig
 
 app = FastAPI(title="Football Predictor API", version="1.0.0")
@@ -43,6 +44,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 TRACE_PATH = DATA_DIR / "trace.pkl"
 MODEL_DATA_PATH = DATA_DIR / "model_data.pkl"
 DATAFRAME_PATH = DATA_DIR / "dataframe.pkl"
+CONFIG_PATH = DATA_DIR / "config.pkl"
 GAMEWEEKS_DIR = DATA_DIR / "gameweeks"
 
 # Ensure data directory exists
@@ -191,15 +193,21 @@ async def train_model(request: TrainRequest):
             finally:
                 stop_event.set()
         
-        # Save trace, model data, and dataframe
+        # Save trace, model data, dataframe, and the config actually used to
+        # train — /predict needs this (clip_theta, use_xG, ...) to build
+        # predictions with the exact formula this trace was fit under,
+        # instead of assuming/guessing it.
         with open(TRACE_PATH, 'wb') as f:
             pickle.dump(trace, f)
-        
+
         with open(MODEL_DATA_PATH, 'wb') as f:
             pickle.dump(input_model_data, f)
-            
+
         with open(DATAFRAME_PATH, 'wb') as f:
             pickle.dump(df, f)
+
+        with open(CONFIG_PATH, 'wb') as f:
+            pickle.dump(config, f)
         
         return {
             "status": "success",
@@ -233,14 +241,25 @@ async def get_predictions():
         
         with open(TRACE_PATH, 'rb') as f:
             trace = pickle.load(f)
-        
+
         with open(MODEL_DATA_PATH, 'rb') as f:
             train_model_data = pickle.load(f)
-        
+
         # Load the saved dataframe from training instead of fetching fresh
         with open(DATAFRAME_PATH, 'rb') as f:
             df = pickle.load(f)
-        
+
+        # The config this trace was actually trained with — needed to
+        # predict with the same formula (clip_theta, use_xG, ...) rather
+        # than assuming it. Falls back to clip_theta=5.0 (TrainRequest's
+        # historical default, not ModelConfig's own dataclass default of
+        # 2.0) only for traces saved before this file existed.
+        if CONFIG_PATH.exists():
+            with open(CONFIG_PATH, 'rb') as f:
+                config = pickle.load(f)
+        else:
+            config = ModelConfig(clip_theta=5.0)
+
 
         past_matches = df[df['datetime'] <= datetime.today()]
         future_matches = df[df['datetime'] > datetime.today()]
@@ -274,20 +293,28 @@ async def get_predictions():
         # Extract posterior samples (not just means)
         attack_samples = trace.posterior['attack'].values  # shape: (chains, draws, time, teams)
         defense_samples = trace.posterior['defence'].values
-        
+
         if 'home_adv' in trace.posterior:
             home_adv_samples = trace.posterior['home_adv'].values  # shape: (chains, draws, teams)
         else:
             home_adv_samples = None
-        
+
+        if config.use_xG and 'beta_xG' in trace.posterior:
+            beta_xG_samples = trace.posterior['beta_xG'].values  # shape: (chains, draws)
+        else:
+            beta_xG_samples = None
+
         # Flatten chain and draw dimensions
         n_chains, n_draws = attack_samples.shape[0], attack_samples.shape[1]
         attack_flat = attack_samples.reshape(n_chains * n_draws, *attack_samples.shape[2:])  # (samples, time, teams)
         defense_flat = defense_samples.reshape(n_chains * n_draws, *defense_samples.shape[2:])
-        
+
         if home_adv_samples is not None:
             home_adv_flat = home_adv_samples.reshape(n_chains * n_draws, home_adv_samples.shape[2])
-        
+
+        if beta_xG_samples is not None:
+            beta_xG_flat = beta_xG_samples.reshape(n_chains * n_draws)
+
         # Reverse team mapping
         idx_to_team = {v: k for k, v in pred_model_data.team_mapping.items()}
         
@@ -317,27 +344,38 @@ async def get_predictions():
             
             # Use last time index from training (next_round - 1)
             t = min(next_round - 1, attack_flat.shape[1] - 1)
-            
+
             # Get samples for this match
             home_attack_samples = attack_flat[:, t, home_idx]
             away_attack_samples = attack_flat[:, t, away_idx]
             home_defense_samples = defense_flat[:, t, home_idx]
             away_defense_samples = defense_flat[:, t, away_idx]
-            
+
             # Home advantage samples
             if home_adv_samples is not None:
                 home_advantage_samples = home_adv_flat[:, home_idx]
             else:
                 home_advantage_samples = 0.0
-            
-            # Calculate lambda (expected goals) for each sample
-            lambda_home_samples = np.exp(home_attack_samples - away_defense_samples + home_advantage_samples)
-            lambda_away_samples = np.exp(away_attack_samples - home_defense_samples)
-            
-            # Clip extreme values to prevent overflow
-            lambda_home_samples = np.clip(lambda_home_samples, 0.01, 10)
-            lambda_away_samples = np.clip(lambda_away_samples, 0.01, 10)
-            
+
+            # Same formula football_model.model.model.build_model trains
+            # with — see football_model.model.predict for why this is a
+            # shared function instead of hand-rederiving theta here. Uses
+            # soft_clip(theta, config.clip_theta) like training does,
+            # rather than a hard clip on the resulting lambda.
+            lambda_home_samples, lambda_away_samples = predict_match_lambdas(
+                attack_team=home_attack_samples,
+                defense_team=home_defense_samples,
+                attack_opp=away_attack_samples,
+                defense_opp=away_defense_samples,
+                home_adv_team=home_advantage_samples,
+                clip_theta=config.clip_theta,
+                beta_xG=beta_xG_flat if beta_xG_samples is not None else None,
+                xG_team=pred_model_data.xG_home[i] if beta_xG_samples is not None else None,
+                xG_opp=pred_model_data.xG_away[i] if beta_xG_samples is not None else None,
+                use_opponent_adjusted_xG=config.use_opponent_adjusted_xG,
+                xG_adjustment_strength=config.xG_adjustment_strength,
+            )
+
             # Use fewer samples for Poisson sampling (subsample for efficiency)
             n_samples = min(1000, len(lambda_home_samples))
             indices = np.random.choice(len(lambda_home_samples), n_samples, replace=False)

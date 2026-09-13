@@ -87,12 +87,21 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
                 defense = pm.Deterministic('defence', def_0 + def_ability + def_form)
         else:
             # Standard single AR(1) process
-            sigma_att, rho_att = ar1_hyperpriors(
-                "att", config.sigma_att, config.rho_att_alpha, config.rho_att_beta
-            )
-            sigma_def, rho_def = ar1_hyperpriors(
-                "def", config.sigma_def, config.rho_def_alpha, config.rho_def_beta
-            )
+            rho_att = rho_prior("att", config.rho_att_alpha, config.rho_att_beta)
+            rho_def = rho_prior("def", config.rho_def_alpha, config.rho_def_beta)
+
+            if config.use_per_team_sigma:
+                # Partial pooling (WP006): each team gets its own innovation
+                # SD, shrunk toward a shared population value — instead of
+                # forcing every team through one global sigma (WP005 found
+                # loosening that single global value doesn't recover
+                # resolution; this tests whether volatility varying BY TEAM
+                # does, which a global knob structurally cannot represent).
+                sigma_att, _ = ar1_hierarchical_sigma("att", data.n_teams, config.sigma_att)
+                sigma_def, _ = ar1_hierarchical_sigma("def", data.n_teams, config.sigma_def)
+            else:
+                sigma_att = pm.HalfNormal("sigma_att", config.sigma_att)
+                sigma_def = pm.HalfNormal("sigma_def", config.sigma_def)
 
             att_0 = team_strength_prior("att_0", data.n_teams, scale=config.init_scale)
             def_0 = team_strength_prior("def_0", data.n_teams, scale=config.init_scale)
@@ -185,6 +194,12 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
             xG_contribution_away = 0.0
 
         # --- Linear predictors ---
+        # NOTE: football_model.model.predict has a plain-numpy mirror of this
+        # exact formula (compute_theta/predict_match_lambdas), used by both
+        # scripts/run_cv_window.py and services/predictor/predictor.py to
+        # make predictions from posterior means/samples after training —
+        # PyTensor code here can't run outside a pm.Model context, so it's
+        # kept in sync by hand. If this formula changes, update that module too.
         theta_home = (
             xG_contribution_home
             + attack[data.t_idx, data.team_idx]

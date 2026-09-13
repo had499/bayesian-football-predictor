@@ -89,6 +89,61 @@ def test_season_start_window_inflates_variance():
     assert inflated_step_var > 5 * normal_step_var
 
 
+def test_ar1_team_process_scalar_sigma_matches_manual_recursion():
+    """Regression guard for WP006's broadcast change to the sigma_t line
+    (season_arr[:, None]) — must still reproduce the exact same recursion
+    for the scalar-sigma case every config before WP006 uses."""
+    n_time, n_teams = 5, 3
+    sigma, rho, init_scale = 0.3, 0.8, 0.2
+    with pm.Model():
+        ar1_team_process("x", n_time, n_teams, sigma, rho, init_scale=init_scale)
+        idata = pm.sample_prior_predictive(draws=1, random_seed=1)
+    z = idata.prior["x_std"].values[0, 0]      # (n_time, n_teams)
+    x_actual = idata.prior["x"].values[0, 0]
+
+    x_expected = np.zeros((n_time, n_teams))
+    x_expected[0] = init_scale * z[0]
+    for t in range(1, n_time):
+        x_expected[t] = rho * x_expected[t - 1] + sigma * z[t]
+    assert np.allclose(x_actual, x_expected, atol=1e-6)
+
+
+def test_ar1_team_process_per_team_sigma_matches_manual_recursion():
+    """WP006: sigma can be a (n_teams,) vector — one innovation SD per team
+    — instead of one scalar shared by all. Cross-check against the same
+    manual recursion, with sigma broadcasting per-team."""
+    n_time, n_teams = 6, 3
+    sigma = np.array([0.05, 0.2, 0.4])
+    rho, init_scale = 0.85, 0.2
+    with pm.Model():
+        ar1_team_process("x", n_time, n_teams, sigma, rho, init_scale=init_scale)
+        idata = pm.sample_prior_predictive(draws=1, random_seed=2)
+    z = idata.prior["x_std"].values[0, 0]
+    x_actual = idata.prior["x"].values[0, 0]
+
+    x_expected = np.zeros((n_time, n_teams))
+    x_expected[0] = init_scale * z[0]
+    for t in range(1, n_time):
+        x_expected[t] = rho * x_expected[t - 1] + sigma * z[t]
+    assert np.allclose(x_actual, x_expected, atol=1e-6)
+
+
+def test_ar1_team_process_per_team_sigma_gives_different_step_variance():
+    """The actual point of per-team sigma: a team with a tiny sigma should
+    move far less than one with a large sigma, across repeated draws —
+    proving the per-team value really reaches each team's own innovations,
+    not just the recursion formula in isolation."""
+    n_time, n_teams = 3, 2
+    sigma = np.array([0.02, 0.5])  # team 0 nearly frozen, team 1 volatile
+    draws = np.stack([
+        _draw_ar1(n_time, n_teams, sigma=sigma, rho=0.0, seed=s)  # rho=0 isolates the innovation term
+        for s in range(200)
+    ])  # (n_draws, n_time, n_teams)
+    var_team0 = draws[:, 1, 0].var()
+    var_team1 = draws[:, 1, 1].var()
+    assert var_team1 > 50 * var_team0
+
+
 def test_centered_over_teams_masked_mean_is_zero_for_active_teams():
     n_time, n_teams = 5, 4
     rng = np.random.default_rng(0)

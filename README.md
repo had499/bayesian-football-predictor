@@ -38,14 +38,18 @@ This project uses several statistics to judge whether the model is any good. Num
 ├── src/football_model/          # Core modeling package
 │   ├── data/                    # Data fetching and preparation
 │   ├── features/                # Feature engineering
-│   ├── model/                   # PyMC model definition
+│   ├── model/                   # PyMC model definition + shared prediction formula
+│   │   ├── model.py            # build_model — training-time formula (PyTensor)
+│   │   ├── predict.py          # numpy mirror of the same formula, for prediction-time use
+│   │   └── components.py, priors.py
 │   └── types/                   # Data structures
-├── services/predictor/          # FastAPI web service
-│   ├── predictor.py            # API endpoints
-│   ├── Dockerfile              # Container definition
-│   └── docker-compose.yml      # Orchestration
+├── services/predictor/          # FastAPI web service (predictor.py — API endpoints)
+├── scripts/                      # Standalone tools (e.g. run_cv_window.py — one CV window per subprocess)
+├── work_products/                # Dated validation/experiment write-ups (WP001, WP002, ...)
 └── notebooks/                   # Exploratory analysis
 ```
+
+**Why `model/predict.py` exists**: `predictor.py`'s `/predict` endpoint and `scripts/run_cv_window.py` both need to turn a trained model's posterior into goal-rate predictions, outside any `pm.Model` context — PyTensor's symbolic graph in `model.py` can't run there directly. Both used to hand-reimplement the `theta_home`/`theta_away` formula separately, which is exactly how a real bug (a missing xG term in one of the two copies) went unnoticed for a while. `predict.py` is the one plain-numpy mirror of `model.py`'s formula that both now call, so a future change to the training formula can't silently drift out of sync with predictions again — see `src/football_model/model/predict.py`'s docstring and `tests/test_predict.py` (which checks its output against `model.py`'s actual PyTensor computation for a real prior-predictive draw, not just "does it run").
 
 ### Data Flow
 

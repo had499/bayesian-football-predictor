@@ -24,6 +24,11 @@ def ar1_team_process(
         opening rounds. Innovation variance is inflated there (scaled by
         season_start_sigma_mult) to reflect summer squad turnover, which
         affects every team, not just ones returning from relegation.
+    sigma: either a scalar (one innovation SD shared by every team — the
+        default, everything before WP006) or a (n_teams,) vector (one SD per
+        team, e.g. from ar1_hierarchical_sigma in priors.py — WP006). Both
+        go through the same `sigma * (...)` line below; broadcasting handles
+        which one it is, so nothing else in this function needs to know.
     """
     # Non-centered parameterization for better sampling when sigma is small
     z = pm.Normal(f"{name}_std", 0, 1, shape=(n_time, n_teams))
@@ -38,8 +43,13 @@ def ar1_team_process(
     else:
         season_arr = pt.as_tensor_variable(season_start_mask)
 
-    # Per-timestep sigma: inflated during each season's opening window.
-    sigma_t = sigma * (1.0 + (season_start_sigma_mult - 1.0) * season_arr)  # shape=(n_time,)
+    # Per-timestep (and, if sigma is per-team, per-team) sigma: inflated
+    # during each season's opening window. season_arr[:, None] makes this
+    # (n_time, 1) so it broadcasts against a scalar sigma -> (n_time, 1)
+    # (unchanged behaviour from before WP006: each scan step still gets a
+    # size-1 value that broadcasts fine against z_t's (n_teams,)) or against
+    # a (n_teams,) sigma -> (n_time, n_teams), one column per team.
+    sigma_t = sigma * (1.0 + (season_start_sigma_mult - 1.0) * season_arr[:, None])
 
     # Use scan instead of Python loop for efficiency with many time steps
     def step(z_t, active_t, sigma_t_val, x_prev, rho):
