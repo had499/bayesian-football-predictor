@@ -183,6 +183,86 @@ def test_predict_match_lambdas_matches_build_model_with_xg(two_season_model_data
         assert np.isclose(lam_opp, lambda_away_model[row], rtol=1e-5)
 
 
+def test_predict_match_lambdas_matches_build_model_with_lineup_xg(two_season_model_data):
+    """WP008: written before this term was ever wired into run_cv_window.py
+    or the CV harness — the exact gap (a new theta term added to training,
+    prediction never updated to match) caused two real bugs earlier in this
+    project (missing xG, un-evaluated Dixon-Coles). Test-first here."""
+    import dataclasses
+
+    md = two_season_model_data
+    rng = np.random.default_rng(0)
+    lineup_dev_home = rng.normal(scale=0.3, size=len(md.t_idx))
+    lineup_dev_away = rng.normal(scale=0.3, size=len(md.t_idx))
+    md = dataclasses.replace(md, lineup_dev_home=lineup_dev_home, lineup_dev_away=lineup_dev_away)
+
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True, use_lineup_xg=True)
+    model = build_model(md, config)
+
+    with model:
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+
+    attack = idata.prior["attack"].values[0, 0]
+    defence = idata.prior["defence"].values[0, 0]
+    home_adv = idata.prior["home_adv"].values[0, 0]
+    beta_lineup = float(idata.prior["beta_lineup"].values[0, 0])
+    lambda_home_model = idata.prior["lambda_home"].values[0, 0]
+    lambda_away_model = idata.prior["lambda_away"].values[0, 0]
+
+    for row in [0, 5, min(20, len(md.t_idx) - 1)]:
+        t, team, opp = int(md.t_idx[row]), int(md.team_idx[row]), int(md.opp_idx[row])
+
+        lam_team, lam_opp = predict_match_lambdas(
+            attack_team=attack[t, team],
+            defense_team=defence[t, team],
+            attack_opp=attack[t, opp],
+            defense_opp=defence[t, opp],
+            home_adv_team=home_adv[team],
+            clip_theta=config.clip_theta,
+            beta_lineup=beta_lineup,
+            lineup_dev_team=md.lineup_dev_home[row],
+            lineup_dev_opp=md.lineup_dev_away[row],
+        )
+        assert np.isclose(lam_team, lambda_home_model[row], rtol=1e-5)
+        assert np.isclose(lam_opp, lambda_away_model[row], rtol=1e-5)
+
+
+def test_predict_rows_matches_build_model_with_lineup_xg(two_season_model_data):
+    """Same cross-check as above, but through predict_rows (the batched
+    path run_cv_window.py actually calls) rather than predict_match_lambdas
+    directly — proving the ModelData plumbing (lineup_dev_home/away read off
+    the struct by row index) is correct too, not just the formula."""
+    import dataclasses
+
+    md = two_season_model_data
+    rng = np.random.default_rng(1)
+    lineup_dev_home = rng.normal(scale=0.3, size=len(md.t_idx))
+    lineup_dev_away = rng.normal(scale=0.3, size=len(md.t_idx))
+    md = dataclasses.replace(md, lineup_dev_home=lineup_dev_home, lineup_dev_away=lineup_dev_away)
+
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True, use_lineup_xg=True)
+    model = build_model(md, config)
+
+    with model:
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+
+    attack = idata.prior["attack"].values[0, 0]
+    defence = idata.prior["defence"].values[0, 0]
+    home_adv = idata.prior["home_adv"].values[0, 0]
+    beta_lineup = float(idata.prior["beta_lineup"].values[0, 0])
+    lambda_home_model = idata.prior["lambda_home"].values[0, 0]
+    lambda_away_model = idata.prior["lambda_away"].values[0, 0]
+
+    rows = np.array([0, 5, min(20, len(md.t_idx) - 1)])
+    lam_home, lam_away, returned_rows = predict_rows(
+        md, rows, attack=attack, defense=defence, home_adv=home_adv,
+        clip_theta=config.clip_theta, beta_lineup=beta_lineup,
+    )
+    assert np.array_equal(returned_rows, rows)
+    assert np.allclose(lam_home, lambda_home_model[rows], rtol=1e-5)
+    assert np.allclose(lam_away, lambda_away_model[rows], rtol=1e-5)
+
+
 def test_dixon_coles_tau_matches_pytensor_version():
     """The numpy mirror must match football_model.model.components'
     actual PyTensor tau exactly — same cross-check pattern as
@@ -249,3 +329,54 @@ def test_dc_outcome_probs_rho_shifts_draw_probability():
     assert not np.isclose(p_draw_0, p_draw_r)
     for probs in [(p_home_0, p_draw_0, p_away_0), (p_home_r, p_draw_r, p_away_r)]:
         assert np.isclose(sum(probs), 1.0)
+
+
+def test_predict_rows_matches_epl_slice_of_multileague_model(two_season_model_data, league2_model_data):
+    """WP011's key claim: evaluation needs ZERO new predict.py code. A
+    trained league's own attack_<name>/defence_<name>/home_adv_<name>
+    posterior slice, read alongside that league's own (completely ordinary)
+    ModelData, must match build_multileague_model's lambda_home/lambda_away
+    for that league exactly through the SAME predict_rows/
+    predict_match_lambdas this project has used since WP001 -- proving a
+    multi-league-trained EPL slice is indistinguishable, at prediction time,
+    from a model that was only ever trained on EPL."""
+    from football_model.model.model import build_multileague_model
+
+    leagues = {"EPL": two_season_model_data, "Bundesliga": league2_model_data}
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True)
+    model = build_multileague_model(leagues, config)
+
+    with model:
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+
+    md = two_season_model_data
+    attack = idata.prior["attack_EPL"].values[0, 0]
+    defence = idata.prior["defence_EPL"].values[0, 0]
+    home_adv = idata.prior["home_adv_EPL"].values[0, 0]
+    lambda_home_model = idata.prior["lambda_home_EPL"].values[0, 0]
+    lambda_away_model = idata.prior["lambda_away_EPL"].values[0, 0]
+
+    rows = np.arange(len(md.t_idx))
+    lam_home, lam_away, returned_rows = predict_rows(
+        md, rows, attack=attack, defense=defence, home_adv=home_adv,
+        clip_theta=config.clip_theta,
+    )
+    assert np.array_equal(returned_rows, rows)
+    assert np.allclose(lam_home, lambda_home_model[rows], rtol=1e-5)
+    assert np.allclose(lam_away, lambda_away_model[rows], rtol=1e-5)
+
+    # and the OTHER league's slice, through the exact same unchanged code path
+    md2 = league2_model_data
+    attack2 = idata.prior["attack_Bundesliga"].values[0, 0]
+    defence2 = idata.prior["defence_Bundesliga"].values[0, 0]
+    home_adv2 = idata.prior["home_adv_Bundesliga"].values[0, 0]
+    lambda_home_model2 = idata.prior["lambda_home_Bundesliga"].values[0, 0]
+    lambda_away_model2 = idata.prior["lambda_away_Bundesliga"].values[0, 0]
+
+    rows2 = np.arange(len(md2.t_idx))
+    lam_home2, lam_away2, _ = predict_rows(
+        md2, rows2, attack=attack2, defense=defence2, home_adv=home_adv2,
+        clip_theta=config.clip_theta,
+    )
+    assert np.allclose(lam_home2, lambda_home_model2[rows2], rtol=1e-5)
+    assert np.allclose(lam_away2, lambda_away_model2[rows2], rtol=1e-5)

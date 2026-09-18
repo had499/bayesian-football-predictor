@@ -55,6 +55,8 @@ def compute_theta(
     xG_for=None,
     use_opponent_adjusted_xG=False,
     xG_adjustment_strength=0.3,
+    beta_lineup=None,
+    lineup_dev_for=None,
 ):
     """theta for one side of a match — the team whose goal rate this is.
 
@@ -70,6 +72,12 @@ def compute_theta(
     (model.py's `defense[opp_idx]`), for the away side it's the home team's
     defense (`defense[team_idx]`), which is exactly what
     `use_opponent_adjusted_xG` adjusts by in build_model.
+
+    `lineup_dev_for` (WP008) is already a log-ratio (today's starting-XI
+    quality vs. that team's own recent normal — see
+    football_model.features.lineup_features), so unlike xG it's added
+    directly, no extra log() here — matching `beta_lineup * lineup_dev_home`
+    in build_model exactly.
     """
     theta = attack_for - defense_against + home_adv_for * is_home
 
@@ -78,6 +86,9 @@ def compute_theta(
             adj = np.clip(1.0 + xG_adjustment_strength * defense_against, 0.5, 1.5)
             beta_xG = beta_xG * adj
         theta = theta + beta_xG * np.log(xG_for + 0.01)
+
+    if beta_lineup is not None and lineup_dev_for is not None:
+        theta = theta + beta_lineup * lineup_dev_for
 
     return theta
 
@@ -95,6 +106,9 @@ def predict_match_lambdas(
     xG_opp=None,
     use_opponent_adjusted_xG=False,
     xG_adjustment_strength=0.3,
+    beta_lineup=None,
+    lineup_dev_team=None,
+    lineup_dev_opp=None,
 ):
     """Predicted (lambda_team, lambda_opp) goal rates for one match, where
     `team` is always the home side (matches how training data is built —
@@ -112,12 +126,14 @@ def predict_match_lambdas(
         beta_xG=beta_xG, xG_for=xG_team,
         use_opponent_adjusted_xG=use_opponent_adjusted_xG,
         xG_adjustment_strength=xG_adjustment_strength,
+        beta_lineup=beta_lineup, lineup_dev_for=lineup_dev_team,
     )
     theta_opp = compute_theta(
         attack_opp, defense_team, home_adv_for=0.0, is_home=0.0,
         beta_xG=beta_xG, xG_for=xG_opp,
         use_opponent_adjusted_xG=use_opponent_adjusted_xG,
         xG_adjustment_strength=xG_adjustment_strength,
+        beta_lineup=beta_lineup, lineup_dev_for=lineup_dev_opp,
     )
     theta_team = soft_clip(theta_team, clip_theta)
     theta_opp = soft_clip(theta_opp, clip_theta)
@@ -135,6 +151,7 @@ def predict_rows(
     beta_xG=None,
     use_opponent_adjusted_xG=False,
     xG_adjustment_strength=0.3,
+    beta_lineup=None,
     max_t=None,
 ):
     """Predicted (lambda_home, lambda_away) for a batch of matches, reading
@@ -192,6 +209,9 @@ def predict_rows(
         xG_opp=model_data.xG_away[idx] if beta_xG is not None else None,
         use_opponent_adjusted_xG=use_opponent_adjusted_xG,
         xG_adjustment_strength=xG_adjustment_strength,
+        beta_lineup=beta_lineup,
+        lineup_dev_team=model_data.lineup_dev_home[idx] if beta_lineup is not None else None,
+        lineup_dev_opp=model_data.lineup_dev_away[idx] if beta_lineup is not None else None,
     )
     return lambda_home, lambda_away, idx
 

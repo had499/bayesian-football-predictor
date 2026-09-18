@@ -1,20 +1,10 @@
 import pymc as pm
 
-def ar1_hyperpriors(
-    name: str,
-    sigma_scale: float,
-    rho_alpha: float,
-    rho_beta: float,
-):
-    sigma = pm.HalfNormal(f"sigma_{name}", sigma_scale)
-    rho   = pm.Beta(f"rho_{name}", rho_alpha, rho_beta)
-    return sigma, rho
-
-
 def rho_prior(name: str, rho_alpha: float, rho_beta: float):
-    """Just the AR(1) persistence half of ar1_hyperpriors — split out so a
-    per-team sigma (ar1_hierarchical_sigma below) can be swapped in without
-    also needing a second, unused scalar sigma from ar1_hyperpriors."""
+    """AR(1) persistence prior, shared by every team. Kept separate from
+    whichever sigma prior is in play (a plain global HalfNormal, or the
+    per-team ar1_hierarchical_sigma below) so build_model can mix and match
+    without a sigma it doesn't need tagging along."""
     return pm.Beta(f"rho_{name}", rho_alpha, rho_beta)
 
 
@@ -61,6 +51,53 @@ def home_advantage_prior(n_teams, mu_center=0.13, mu_scale=0.03, sd_scale=0.02):
     return pm.Deterministic("home_adv", mu + sd * home_adv_raw)
 
 
-def match_effect_prior(n_matches, sd_scale=0.1):
-    sigma = pm.HalfNormal("sigma_match", sd_scale)
-    return pm.Normal("match_effect", 0.0, sigma, shape=n_matches)
+def league_home_advantage_prior(
+    league_names, league_n_teams, mu_center=0.13, mu_scale=0.03,
+    between_league_scale=0.03, sd_scale=0.02,
+):
+    """Multi-league extension of home_advantage_prior (WP011): adds ONE more
+    level to the existing team -> global pooling, making it
+    team -> league -> global. Each league's own average home advantage
+    (`mu_league`) is itself partially pooled toward a shared `mu_global`,
+    instead of every team in every league being pooled toward one identical
+    mean the way the single-league version does — home advantage is
+    well-documented to vary systematically by country/competition, unlike
+    (as far as WP011's diagnostics found any reason to believe) the
+    within-league team-to-team spread, which is why only mu gets a league
+    level here: `sd` (how much teams within a league differ from their own
+    league's mean) stays a single shared scalar across every league, the
+    same role config.home_adv_sd already played pre-WP011 — WP011 only
+    extends the part of the hierarchy with a specific, evidenced reason to
+    vary by league; adding more per-league flexibility than that isn't
+    evidence-backed (see WP006's per-team sigma: more granularity than the
+    evidence calls for tends to just pool noise, not signal).
+
+    Non-centered throughout, same funnel-avoidance pattern as
+    home_advantage_prior and ar1_hierarchical_sigma.
+
+    league_names/league_n_teams: parallel lists, one entry per league, used
+    only to build readable/unique PyMC variable names (`home_adv_<league>`)
+    so multiple leagues' worth of per-team home_adv can coexist in one
+    pm.Model without name collisions.
+
+    Returns (mu_global, mu_league, sd, home_adv_by_league): home_adv_by_league
+    is a list of (n_teams_l,) tensors, one per league, in the same order as
+    the inputs.
+    """
+    assert len(league_names) == len(league_n_teams)
+    n_leagues = len(league_names)
+
+    mu_global = pm.Normal("home_mu_global", mu_center, mu_scale)
+    between_league_sd = pm.HalfNormal("home_mu_between_league_sd", between_league_scale)
+    mu_league_raw = pm.Normal("home_mu_league_raw", 0.0, 1.0, shape=n_leagues)
+    mu_league = pm.Deterministic("home_mu_league", mu_global + between_league_sd * mu_league_raw)
+
+    sd = pm.HalfNormal("home_sd", sd_scale)  # shared within-league team spread
+
+    home_adv_by_league = []
+    for l, (league_name, n_teams_l) in enumerate(zip(league_names, league_n_teams)):
+        raw = pm.Normal(f"home_adv_raw_{league_name}", 0.0, 1.0, shape=n_teams_l)
+        home_adv_l = pm.Deterministic(f"home_adv_{league_name}", mu_league[l] + sd * raw)
+        home_adv_by_league.append(home_adv_l)
+
+    return mu_global, mu_league, sd, home_adv_by_league

@@ -22,13 +22,21 @@ class ModelData:
     goals_away: np.ndarray     # shape=(n_obs,)
     xG_home: np.ndarray        # shape=(n_obs,)
     xG_away: np.ndarray        # shape=(n_obs,)
-    
+
     # --- team mapping ---
     team_mapping: dict = None  # maps team name -> index
 
     # --- multi-season bookkeeping ---
     active_mask: np.ndarray = None        # shape=(n_time, n_teams); 1 if team is in the league at time t, else 0
     season_start_mask: np.ndarray = None  # shape=(n_time,); 1 if t falls in a season's opening window
+
+    # --- lineup-quality covariate (WP008) ---
+    # log-ratio of today's starting-XI quality vs. that team's own recent
+    # normal (see football_model.features.lineup_features) — zero, not
+    # missing, when lineup data isn't available for a match, so this is
+    # always safe to read even when use_lineup_xg=False.
+    lineup_dev_home: np.ndarray = None    # shape=(n_obs,)
+    lineup_dev_away: np.ndarray = None    # shape=(n_obs,)
 
 from dataclasses import dataclass
 
@@ -50,22 +58,8 @@ class ModelConfig:
     # When True, sigma_att/sigma_def above are reinterpreted as the scale of
     # a population-level HalfNormal hyperprior that each team's own sigma is
     # partially pooled toward (ar1_hierarchical_sigma in priors.py), instead
-    # of being the one global innovation SD every team shares. Only affects
-    # the standard (non-form-decomposition) AR1 branch in build_model.
+    # of being the one global innovation SD every team shares.
     use_per_team_sigma: bool = False
-
-    # -------------------------
-    # Form decomposition (ability + form)
-    # -------------------------
-    use_form_decomposition: bool = False  # split into ability (long-term) + form (short-term)
-    sigma_att_ability: float = 0.003      # long-term ability: very stable
-    sigma_def_ability: float = 0.003
-    rho_ability_alpha: float = 49.0       # Beta(49,1) → rho~0.98 (very persistent)
-    rho_ability_beta: float = 1.0
-    sigma_att_form: float = 0.015         # short-term form: more volatile
-    sigma_def_form: float = 0.015
-    rho_form_alpha: float = 8.0           # Beta(8,1) → rho~0.89 (mean-reverting)
-    rho_form_beta: float = 1.0
 
     # -------------------------
     # Home advantage
@@ -74,21 +68,11 @@ class ModelConfig:
     home_sd: float = 0.03
     home_adv_sd: float = 0.02       # per-team home advantage variation
 
-    # -------------------------
-    # Match effect
-    # -------------------------
-    sigma_match: float = 0.10
-
-    # -------------------------
-    # Goal likelihood
-    # -------------------------
-    goal_alpha: float = 2.0         # NegativeBinomial dispersion (data shows minimal overdispersion)
-
-    # -------------------------
-    # xG likelihood
-    # -------------------------
-    sigma_xG_mu: float = 0.1
-    sigma_xG_sd: float = 0.05
+    # Multi-league home advantage (WP011): how much a league's own average
+    # home advantage is allowed to differ from the shared global mean
+    # (home_mu). Unused by build_model's single-league path; only
+    # build_multileague_model reads this.
+    home_mu_league_sd: float = 0.03
 
     # -------------------------
     # Opponent-adjusted xG
@@ -97,12 +81,16 @@ class ModelConfig:
     xG_adjustment_strength: float = 0.3     # how much to adjust (0=none, 1=full adjustment)
 
     # -------------------------
+    # Lineup-quality covariate (WP008)
+    # -------------------------
+    use_lineup_xg: bool = False     # add beta_lineup * lineup_dev to theta (starting-XI xG/xA vs. team's own normal)
+
+    # -------------------------
     # Model options
     # -------------------------
     center_team_strength: bool = True  # center team strengths at each time point
     soft_center_team_strength: bool = True  # if not centering, softly pin per-time means near 0 to avoid drift
     soft_center_sd: float = 1.0        # strength of soft-centering (larger = weaker)
-    likelihood: str = "negbin"      # "poisson" or "negbin"
     use_xG: bool = False            # include xG as weighted feature (default: False)
     clip_theta: float = 2.0         # soft clip parameter
     init_scale: float = 0.2         # initial scale for AR1 / team strengths
@@ -110,7 +98,6 @@ class ModelConfig:
     # -------------------------
     # Multi-season handling
     # -------------------------
-    season_start_window: int = 5          # rounds at the start of each season treated as high-uncertainty
     season_start_sigma_mult: float = 3.0  # multiplier on sigma_att/sigma_def during that window
 
     # -------------------------

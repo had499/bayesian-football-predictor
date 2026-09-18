@@ -1,7 +1,104 @@
 from football_model.types.model_data import *
 import numpy as np
 
-def prepare_model_data(df: pd.DataFrame, max_round, season_start_window: int = 5) -> ModelData:
+
+def max_round_for_cutoff_date(df: pd.DataFrame, cutoff_date) -> int:
+    """WP011: the highest `round` value among a league's own matches on or
+    before `cutoff_date`.
+
+    Multi-league training needs a `max_round` for leagues that aren't the
+    one being evaluated (see prepare_multileague_data) — and those leagues'
+    round numbers don't line up with the evaluated league's (different
+    season lengths, different fixture calendars), so passing the same
+    integer max_round to every league would either leak future matches into
+    training for a shorter-season league or needlessly discard already-past
+    matches for a longer one. Using a shared cutoff DATE instead and
+    resolving it to each league's own max_round keeps every league's
+    training data anchored to the same real-world point in time — the
+    leakage-safety property that actually matters — regardless of how many
+    rounds each competition plays.
+
+    Strict `<=`: a match ON the cutoff date is included (matches
+    prepare_model_data's own `df["round"] <= max_round` convention, which is
+    also inclusive), a match after it is not.
+    """
+    cutoff = pd.Timestamp(cutoff_date)
+    eligible = df.loc[pd.to_datetime(df["datetime"]) <= cutoff, "round"]
+    if len(eligible) == 0:
+        return 0
+    return int(eligible.max())
+
+
+def prepare_multileague_data(
+    engineered_dfs: dict, cutoff_date, season_start_window: int = 5,
+) -> dict:
+    """WP011: build one ModelData per league, independently.
+
+    `engineered_dfs`: {league_name: df}, each df already run through the
+    same feature-engineering pipeline a single-league df goes through
+    (add_rounds_to_data / add_match_ids / add_home_away_goals_xg) —
+    unchanged, called once per league exactly as it already is for EPL
+    alone. Nothing about that pipeline or about prepare_model_data itself
+    needed to change for multi-league support: each league's df is prepared
+    completely independently, with its own local team-index space
+    (team_mapping) and its own time axis starting at 0 — teams in different
+    leagues never share a match, and there's no shared "global round
+    calendar" for prepare_model_data to get confused about, because each
+    call only ever sees one league's own df.
+
+    `cutoff_date`: shared real-world "as of" date across every league (see
+    max_round_for_cutoff_date for why a date, not a round number, is the
+    leakage-safe way to align competitions with different season lengths).
+
+    A league with ZERO matches on or before `cutoff_date` — the real case
+    this guards against: a non-eval league deliberately fetched with fewer
+    seasons than the eval league (WP011's "trim non-EPL history" compute
+    lever), so an early eval-league window's cutoff date can fall before
+    that league's trimmed data even starts — is silently OMITTED from the
+    result rather than passed into prepare_model_data, which would crash
+    (`max_round=0` makes its `df[df["round"] <= max_round]` filter select
+    nothing, and `nan`-length axes downstream) rather than degrade
+    gracefully. This is the league-level analogue of a single league's own
+    `active_mask`: a team/league that hasn't started yet contributes
+    nothing to that window, it doesn't error the whole run. Found and fixed
+    via a real end-to-end test (see WP011's README), not written
+    defensively up front — worth being upfront that this needs checking
+    for any newly-added league/trim combination, not just trusted blind.
+
+    Returns {league_name: ModelData} — MAY have fewer keys than
+    `engineered_dfs` for early cutoff dates (see above); always has at
+    least the eval league, since callers are expected to trim only the
+    NON-eval leagues, never the one actually being evaluated.
+    """
+    result = {}
+    for name, df in engineered_dfs.items():
+        max_round = max_round_for_cutoff_date(df, cutoff_date)
+        if max_round == 0:
+            print(f"  prepare_multileague_data: skipping {name!r} for this window — "
+                  f"no matches on/before {pd.Timestamp(cutoff_date).date()} (league's fetched history starts later)")
+            continue
+        result[name] = prepare_model_data(
+            df, max_round=max_round, season_start_window=season_start_window,
+        )
+    return result
+
+
+def prepare_model_data(
+    df: pd.DataFrame, max_round, season_start_window: int = 5,
+    lineup_dev_table: pd.DataFrame = None,
+) -> ModelData:
+    """`lineup_dev_table` (WP008, optional): the output of
+    football_model.features.lineup_features.build_lineup_deviation_table —
+    columns `team` (full name, matching `team_long`/`opp_team_long` below,
+    NOT the short codes in `team`/`opp_team`), `date`, `lineup_dev`. Joined
+    onto each observation by (team, match date); a match with no matching
+    row (lineup data doesn't cover that far back, or wasn't fetched)
+    defaults to lineup_dev=0.0 — "no known deviation from normal" is exactly
+    the safe default when there's no information either way, not a missing
+    value that needs to propagate or crash downstream. Leave as None (the
+    default) to skip lineup features entirely, same as every call site
+    before WP008.
+    """
     # Sort & index teams
     df = df.sort_values("datetime").reset_index(drop=True)
     teams = pd.unique(df[['team', 'opp_team']].values.ravel())
@@ -115,6 +212,20 @@ def prepare_model_data(df: pd.DataFrame, max_round, season_start_window: int = 5
         xG_home_baseline[idx] = (team_xg_at_t[t, home_team] + team_xga_at_t[t, away_team]) / 2
         xG_away_baseline[idx] = (team_xg_at_t[t, away_team] + team_xga_at_t[t, home_team]) / 2
 
+    if lineup_dev_table is not None and len(lineup_dev_table) > 0:
+        ldt_dates = pd.to_datetime(lineup_dev_table["date"]).dt.normalize()
+        lineup_dev_map = dict(zip(zip(lineup_dev_table["team"], ldt_dates), lineup_dev_table["lineup_dev"]))
+        obs_dates = df_obs["datetime"].dt.normalize()
+        lineup_dev_home = np.array(
+            [lineup_dev_map.get((t, d), 0.0) for t, d in zip(df_obs["team_long"], obs_dates)]
+        )
+        lineup_dev_away = np.array(
+            [lineup_dev_map.get((t, d), 0.0) for t, d in zip(df_obs["opp_team_long"], obs_dates)]
+        )
+    else:
+        lineup_dev_home = np.zeros(len(df_obs))
+        lineup_dev_away = np.zeros(len(df_obs))
+
     return ModelData(
         n_teams=n_teams,
         n_matches=n_matches,
@@ -131,4 +242,6 @@ def prepare_model_data(df: pd.DataFrame, max_round, season_start_window: int = 5
         team_mapping=team_idx_map,
         active_mask=active_mask,
         season_start_mask=season_start_mask,
+        lineup_dev_home=lineup_dev_home.astype("float32"),
+        lineup_dev_away=lineup_dev_away.astype("float32"),
     )

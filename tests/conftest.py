@@ -38,6 +38,8 @@ def make_synthetic_league_df(season_team_lists, rounds_per_season=6, seed=0):
                         dict(
                             team=team,
                             opp_team=opp,
+                            team_long=team,   # no short/long distinction needed in this
+                            opp_team_long=opp,  # synthetic fixture -- just aliases, for WP008 join tests
                             is_home=is_home,
                             goals=goals,
                             goals_against=goals_against,
@@ -80,4 +82,41 @@ def two_season_model_data(engineered_two_season_df):
 
     return prepare_model_data(
         engineered_two_season_df, max_round=engineered_two_season_df["round"].max()
+    )
+
+
+# --- Second synthetic league (WP011 multi-league tests) ---
+# Deliberately different team count and round count from two_season_teams,
+# so multi-league tests can't accidentally pass just because both leagues
+# happen to be the same shape.
+
+@pytest.fixture
+def league2_teams():
+    """No relegation/promotion in this one (all 6 teams both seasons) —
+    covers the "stable league" case two_season_teams doesn't."""
+    return [
+        ("2023", ["W", "X", "Y", "Z", "P", "Q"]),
+        ("2024", ["W", "X", "Y", "Z", "P", "Q"]),
+    ]
+
+
+@pytest.fixture
+def raw_league2_df(league2_teams):
+    return make_synthetic_league_df(league2_teams, rounds_per_season=5, seed=7)
+
+
+@pytest.fixture
+def engineered_league2_df(raw_league2_df):
+    df = add_rounds_to_data(raw_league2_df)
+    df = add_match_ids(df)
+    df = add_home_away_goals_xg(df)
+    return df
+
+
+@pytest.fixture
+def league2_model_data(engineered_league2_df):
+    from football_model.data.prepare_model_data import prepare_model_data
+
+    return prepare_model_data(
+        engineered_league2_df, max_round=engineered_league2_df["round"].max()
     )
