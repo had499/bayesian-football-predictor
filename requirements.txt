@@ -2,13 +2,14 @@ pandas
 understatapi==0.7.0
 numpy
 requests
-matplotlib
 scipy
 arviz
-seaborn
 scikit-learn
 jupyter
 pymc
+pytensor
+numpyro
+jax
 fastapi
 uvicorn[standard]
 pydantic

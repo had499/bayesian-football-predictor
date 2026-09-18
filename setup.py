@@ -9,6 +9,10 @@ setup(
         "pandas",
         "numpy",
         "pymc",
+        "pytensor",
         "understatapi",
+        "scipy",
+        "scikit-learn",
+        "requests",
     ],
 )
