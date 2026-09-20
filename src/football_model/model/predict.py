@@ -57,6 +57,8 @@ def compute_theta(
     xG_adjustment_strength=0.3,
     beta_lineup=None,
     lineup_dev_for=None,
+    beta_continuity=None,
+    continuity_opp_for=None,
 ):
     """theta for one side of a match — the team whose goal rate this is.
 
@@ -78,6 +80,12 @@ def compute_theta(
     football_model.features.lineup_features), so unlike xG it's added
     directly, no extra log() here — matching `beta_lineup * lineup_dev_home`
     in build_model exactly.
+
+    `continuity_opp_for` (WP013) is the OPPONENT's standardised defence
+    continuity — an unusual back line raises the other side's scoring, so
+    for the home side this is the away team's value and vice versa —
+    matching `beta_continuity * defence_cont_away` (home) /
+    `beta_continuity * defence_cont_home` (away) in build_model.
     """
     theta = attack_for - defense_against + home_adv_for * is_home
 
@@ -89,6 +97,9 @@ def compute_theta(
 
     if beta_lineup is not None and lineup_dev_for is not None:
         theta = theta + beta_lineup * lineup_dev_for
+
+    if beta_continuity is not None and continuity_opp_for is not None:
+        theta = theta + beta_continuity * continuity_opp_for
 
     return theta
 
@@ -109,6 +120,9 @@ def predict_match_lambdas(
     beta_lineup=None,
     lineup_dev_team=None,
     lineup_dev_opp=None,
+    beta_continuity=None,
+    continuity_team=None,
+    continuity_opp=None,
 ):
     """Predicted (lambda_team, lambda_opp) goal rates for one match, where
     `team` is always the home side (matches how training data is built —
@@ -127,6 +141,7 @@ def predict_match_lambdas(
         use_opponent_adjusted_xG=use_opponent_adjusted_xG,
         xG_adjustment_strength=xG_adjustment_strength,
         beta_lineup=beta_lineup, lineup_dev_for=lineup_dev_team,
+        beta_continuity=beta_continuity, continuity_opp_for=continuity_opp,
     )
     theta_opp = compute_theta(
         attack_opp, defense_team, home_adv_for=0.0, is_home=0.0,
@@ -134,6 +149,7 @@ def predict_match_lambdas(
         use_opponent_adjusted_xG=use_opponent_adjusted_xG,
         xG_adjustment_strength=xG_adjustment_strength,
         beta_lineup=beta_lineup, lineup_dev_for=lineup_dev_opp,
+        beta_continuity=beta_continuity, continuity_opp_for=continuity_team,
     )
     theta_team = soft_clip(theta_team, clip_theta)
     theta_opp = soft_clip(theta_opp, clip_theta)
@@ -152,6 +168,7 @@ def predict_rows(
     use_opponent_adjusted_xG=False,
     xG_adjustment_strength=0.3,
     beta_lineup=None,
+    beta_continuity=None,
     max_t=None,
 ):
     """Predicted (lambda_home, lambda_away) for a batch of matches, reading
@@ -212,6 +229,9 @@ def predict_rows(
         beta_lineup=beta_lineup,
         lineup_dev_team=model_data.lineup_dev_home[idx] if beta_lineup is not None else None,
         lineup_dev_opp=model_data.lineup_dev_away[idx] if beta_lineup is not None else None,
+        beta_continuity=beta_continuity,
+        continuity_team=model_data.defence_cont_home[idx] if beta_continuity is not None else None,
+        continuity_opp=model_data.defence_cont_away[idx] if beta_continuity is not None else None,
     )
     return lambda_home, lambda_away, idx
 
@@ -256,6 +276,23 @@ def dixon_coles_log_correction(lambda_home, lambda_away, goals_home, goals_away,
     return np.log(np.maximum(tau, 1e-6))
 
 
+def _dc_score_grid(lambda_home, lambda_away, rho, max_goals):
+    """Unnormalised scoreline probability grid, grid[i, j] = P(home i, away j),
+    truncated at `max_goals` per side, with the Dixon-Coles correction applied
+    when `rho` is not None. Shared by dc_outcome_probs (1X2) and dc_over_prob
+    (totals) so both markets come from exactly the same distribution."""
+    goals = np.arange(max_goals + 1)
+    ph = poisson.pmf(goals, lambda_home)
+    pa = poisson.pmf(goals, lambda_away)
+    grid = np.outer(ph, pa)
+
+    if rho is not None:
+        goals_h_grid, goals_a_grid = np.meshgrid(goals, goals, indexing="ij")
+        tau_grid = dixon_coles_tau(lambda_home, lambda_away, goals_h_grid, goals_a_grid, rho)
+        grid = grid * np.maximum(tau_grid, 0.0)  # keep grid entries non-negative
+    return grid
+
+
 def dc_outcome_probs(lambda_home, lambda_away, rho=None, max_goals=10):
     """Home/draw/away win probabilities from Poisson goal-rate parameters,
     via exact convolution over the scoreline grid — optionally with the
@@ -271,18 +308,22 @@ def dc_outcome_probs(lambda_home, lambda_away, rho=None, max_goals=10):
     here regardless of rho is exactly the evaluation gap this function
     exists to close.
     """
-    goals = np.arange(max_goals + 1)
-    ph = poisson.pmf(goals, lambda_home)
-    pa = poisson.pmf(goals, lambda_away)
-    grid = np.outer(ph, pa)  # grid[i, j] = P(home scores i, away scores j)
-
-    if rho is not None:
-        goals_h_grid, goals_a_grid = np.meshgrid(goals, goals, indexing="ij")
-        tau_grid = dixon_coles_tau(lambda_home, lambda_away, goals_h_grid, goals_a_grid, rho)
-        grid = grid * np.maximum(tau_grid, 0.0)  # keep grid entries non-negative
+    grid = _dc_score_grid(lambda_home, lambda_away, rho, max_goals)
 
     p_home = np.tril(grid, -1).sum()
     p_draw = np.trace(grid)
     p_away = np.triu(grid, 1).sum()
     total = p_home + p_draw + p_away  # <1 due to truncation at max_goals; renormalize
     return p_home / total, p_draw / total, p_away / total
+
+
+def dc_over_prob(lambda_home, lambda_away, rho=None, line=2.5, max_goals=10):
+    """P(total goals > `line`) from the same scoreline grid as
+    dc_outcome_probs (WP016, over/under markets). `line` is a half-goal line
+    such as 2.5, so there is no push. Renormalised over the truncated grid
+    exactly as dc_outcome_probs is; pass the trained rho_dc, or None for
+    independent Poisson."""
+    grid = _dc_score_grid(lambda_home, lambda_away, rho, max_goals)
+    goals = np.arange(max_goals + 1)
+    total_goals = np.add.outer(goals, goals)
+    return float(grid[total_goals > line].sum() / grid.sum())

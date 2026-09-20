@@ -8,6 +8,7 @@ from football_model.model.model import build_model
 from football_model.model.predict import (
     compute_theta,
     dc_outcome_probs,
+    dc_over_prob,
     dixon_coles_log_correction,
     dixon_coles_tau,
     predict_match_lambdas,
@@ -380,3 +381,125 @@ def test_predict_rows_matches_epl_slice_of_multileague_model(two_season_model_da
     )
     assert np.allclose(lam_home2, lambda_home_model2[rows2], rtol=1e-5)
     assert np.allclose(lam_away2, lambda_away_model2[rows2], rtol=1e-5)
+
+
+def test_compute_theta_continuity_term_arithmetic():
+    base = compute_theta(attack_for=0.5, defense_against=0.2, home_adv_for=0.1, is_home=1.0)
+    with_c = compute_theta(attack_for=0.5, defense_against=0.2, home_adv_for=0.1, is_home=1.0,
+                           beta_continuity=-0.07, continuity_opp_for=2.0)
+    assert np.isclose(with_c - base, -0.14)
+    # no beta or no feature -> unchanged
+    assert compute_theta(0.5, 0.2, 0.1, 1.0, beta_continuity=None, continuity_opp_for=2.0) == base
+
+
+def _md_with_asymmetric_continuity(md, seed):
+    import dataclasses
+    rng = np.random.default_rng(seed)
+    n = len(md.t_idx)
+    # deliberately different home/away values: a home/away swap anywhere in
+    # the numpy mirror would change lambdas and fail the comparison
+    return dataclasses.replace(
+        md,
+        defence_cont_home=rng.normal(size=n).astype("float32"),
+        defence_cont_away=(rng.normal(size=n) + 1.5).astype("float32"),
+    )
+
+
+def test_predict_match_lambdas_matches_build_model_with_continuity(two_season_model_data):
+    """WP013: the numpy mirror must equal build_model's real lambdas,
+    written before the term was wired into run_cv_window.py — the same
+    discipline WP008 followed, for the same reason (two earlier bugs were a
+    term trained on but never predicted with)."""
+    md = _md_with_asymmetric_continuity(two_season_model_data, 0)
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True, use_continuity=True)
+    model = build_model(md, config)
+    with model:
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+
+    attack = idata.prior["attack"].values[0, 0]
+    defence = idata.prior["defence"].values[0, 0]
+    home_adv = idata.prior["home_adv"].values[0, 0]
+    beta_c = float(idata.prior["beta_continuity"].values[0, 0])
+    lam_h_model = idata.prior["lambda_home"].values[0, 0]
+    lam_a_model = idata.prior["lambda_away"].values[0, 0]
+
+    for row in [0, 5, min(20, len(md.t_idx) - 1)]:
+        t, team, opp = int(md.t_idx[row]), int(md.team_idx[row]), int(md.opp_idx[row])
+        lam_team, lam_opp = predict_match_lambdas(
+            attack_team=attack[t, team], defense_team=defence[t, team],
+            attack_opp=attack[t, opp], defense_opp=defence[t, opp],
+            home_adv_team=home_adv[team], clip_theta=config.clip_theta,
+            beta_continuity=beta_c,
+            continuity_team=md.defence_cont_home[row], continuity_opp=md.defence_cont_away[row],
+        )
+        assert np.isclose(lam_team, lam_h_model[row], rtol=1e-5)
+        assert np.isclose(lam_opp, lam_a_model[row], rtol=1e-5)
+
+
+def test_predict_rows_matches_build_model_with_continuity(two_season_model_data):
+    """Same check through predict_rows, the batched path run_cv_window.py
+    calls: proves the ModelData plumbing (which array feeds which side) too."""
+    md = _md_with_asymmetric_continuity(two_season_model_data, 1)
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True, use_continuity=True)
+    model = build_model(md, config)
+    with model:
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+
+    attack = idata.prior["attack"].values[0, 0]
+    defence = idata.prior["defence"].values[0, 0]
+    home_adv = idata.prior["home_adv"].values[0, 0]
+    beta_c = float(idata.prior["beta_continuity"].values[0, 0])
+    rows = np.array([0, 5, min(20, len(md.t_idx) - 1)])
+    lam_home, lam_away, _ = predict_rows(
+        md, rows, attack=attack, defense=defence, home_adv=home_adv,
+        clip_theta=config.clip_theta, beta_continuity=beta_c,
+    )
+    assert np.allclose(lam_home, idata.prior["lambda_home"].values[0, 0][rows], rtol=1e-5)
+    assert np.allclose(lam_away, idata.prior["lambda_away"].values[0, 0][rows], rtol=1e-5)
+
+
+# --- WP016: over/under from the same scoreline grid ---
+
+def test_dc_over_prob_rho_none_matches_the_poisson_sum():
+    """Independent home and away Poisson goals sum to a Poisson with the summed
+    mean, so P(total > 2) has a closed form. Large max_goals makes the
+    truncation negligible."""
+    from scipy.stats import poisson
+    for lh, la in [(1.4, 1.1), (0.7, 0.6), (2.6, 1.9)]:
+        assert np.isclose(dc_over_prob(lh, la, rho=None, line=2.5, max_goals=40), poisson.sf(2, lh + la), atol=1e-9)
+        assert np.isclose(dc_over_prob(lh, la, rho=None, line=1.5, max_goals=40), poisson.sf(1, lh + la), atol=1e-9)
+
+
+def test_dc_over_prob_matches_a_brute_force_loop_with_dixon_coles():
+    """Independent implementation: loop over scorelines with the scalar tau."""
+    from scipy.stats import poisson
+    lh, la, rho, mg = 1.6, 1.2, 0.08, 10
+    num = den = 0.0
+    for i in range(mg + 1):
+        for j in range(mg + 1):
+            p = poisson.pmf(i, lh) * poisson.pmf(j, la) * max(dixon_coles_tau(lh, la, i, j, rho), 0.0)
+            den += p
+            if i + j > 2:
+                num += p
+    assert np.isclose(dc_over_prob(lh, la, rho=rho, line=2.5, max_goals=mg), num / den, rtol=1e-12)
+
+
+def test_dc_over_prob_rho_zero_equals_none_and_rho_shifts_it():
+    assert np.isclose(dc_over_prob(1.4, 1.1, rho=0.0), dc_over_prob(1.4, 1.1, rho=None))
+    assert not np.isclose(dc_over_prob(1.4, 1.1, rho=0.1), dc_over_prob(1.4, 1.1, rho=None), atol=1e-4)
+
+
+def test_dc_over_prob_is_a_probability_and_monotone_in_the_goal_rate():
+    lows = [dc_over_prob(0.8, 0.7, rho=0.05), dc_over_prob(1.4, 1.1, rho=0.05), dc_over_prob(2.4, 1.9, rho=0.05)]
+    assert all(0 < p < 1 for p in lows) and lows == sorted(lows)
+    assert dc_over_prob(1.4, 1.1, rho=0.05, line=3.5) < dc_over_prob(1.4, 1.1, rho=0.05, line=2.5) < dc_over_prob(1.4, 1.1, rho=0.05, line=1.5)
+
+
+def test_dc_over_prob_agrees_with_the_1x2_probabilities_it_shares_a_grid_with():
+    """dc_outcome_probs must be unchanged by the grid refactor: a 0-goal-line 'over'
+    (any goal at all) plus P(0-0) is 1, and the 1X2 probabilities still sum to 1."""
+    lh, la, rho = 1.3, 1.0, 0.06
+    ph, pd_, pa = dc_outcome_probs(lh, la, rho=rho)
+    assert np.isclose(ph + pd_ + pa, 1.0)
+    assert dc_over_prob(lh, la, rho=rho, line=-0.5) == 1.0
+

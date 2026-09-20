@@ -1,6 +1,6 @@
 # WP011 — Multi-League Hierarchical Pooling
 
-**Status: implemented, unit-tested (25 new tests, 108/108 total passing), and verified end-to-end on real fetched EPL + Bundesliga + La_Liga data — including a real concurrent 3-window run that caught and fixed one genuine bug (see Compute below). Full 5-league walk-forward CV (the actual WP009-style validation) not run — that's the next step, and per this project's standing division of labor, the real 18-window screen and 35-window confirmation are yours to run via `wp011_multileague_hierarchy.ipynb`, same as every prior WP.**
+**Status: complete. Implemented, unit-tested (25 new tests, 108/108 total passing), and validated on the full 5-league, 35-window walk-forward CV. Result: negative — pooling five leagues left the EPL model's resolution gap to Pinnacle unchanged (paired RPS difference vs the WP001 baseline +0.0001, 95% CI [−0.0006, +0.0008]). See "Results" below.**
 
 ## Why
 
@@ -105,14 +105,55 @@ Recapped from the design discussion: hierarchical scale-parameters estimated fro
 
 Calibrated expectation: moderate chance of a small, real, mechanistically explainable improvement in calibration; low chance of closing most of the remaining gap to Pinnacle, since WP010 already showed that gap is diffuse and plausibly dominated by information (team news, referee, market money) no historical dataset carries regardless of how many leagues it spans. Success here looks like "closes some more of the gap, measurably, for an explainable reason" — not "becomes competitive with the market."
 
+## Results
+
+**Setup as run.** EPL: all 6 seasons (4,560 rows); Bundesliga, La_Liga, Serie_A, Ligue_1 trimmed to 2023–2025 (1,836 / 2,280 / 2,280 / 1,836 rows). All five leagues were used — none dropped; the non-EPL row counts equal exactly 3 complete seasons each (e.g. La_Liga 3 × 380 matches × 2 rows), so no missing rounds. Same 35 walk-forward windows as WP001, same 361 Pinnacle-covered EPL matches, same RPS + bootstrap methodology. The `multileague` arm ran with WP001's default priors (`overrides={}`), 3 chains × (2000 tune + 2000 draws), `target_accept=0.95`. The 35 windows finished with no timeouts and no failed windows.
+
+**Headline (35 windows, n = 361; Pinnacle RPS = 0.1786):**
+
+| arm | model RPS | gap to Pinnacle | 95% CI |
+|---|---|---|---|
+| WP001 baseline (EPL-only) | 0.1925 | +0.0139 | [+0.0080, +0.0198] |
+| **WP011 multileague** | 0.1926 | **+0.0141** | [+0.0081, +0.0200] |
+
+The direct test is the **paired** difference, since both arms are scored on the same matches: multileague − baseline = **+0.0001 RPS, 95% CI [−0.0006, +0.0008]**. Positive means multileague is slightly worse; it was better on 52% of matches, which is a coin flip. The other measures agree: mean log-likelihood improvement over naive is 1.595 vs 1.598 per window (multileague better in 13 of 35 windows), MAE is 0.9213 vs 0.9212, and the two arms' `lambda_home` predictions correlate at 0.998 (mean absolute difference 0.02 goals). Pooling changed what the model predicts almost not at all.
+
+**Size of effect this test could have seen.** The CI's favourable end is −0.0006 RPS, about 4% of the 0.0139 gap. So this run rules out pooling closing more than a few percent of the gap, at least in this configuration. It does not say pooling has exactly zero effect.
+
+**Partial vs full coverage.** Because non-EPL data is trimmed to 2023–2025, windows 1–14 (training cutoff before 2023-09) fit EPL-only (`leagues_used` = 1) and windows 15–35 fit all five leagues. Splitting on that:
+
+| windows | n | paired multileague − baseline | 95% CI |
+|---|---|---|---|
+| 1–14, EPL-only fit (partial coverage) | 154 | +0.00006 | [−0.00014, +0.00025] |
+| 15–35, all five leagues | 207 | +0.00019 | [−0.00105, +0.00145] |
+
+The partial-coverage row is a useful sanity check: with one league, the multileague model reproduces the baseline to within +0.00006 RPS, so the new code path is faithful to the old one. The full-coverage row is the real test of the hypothesis, and it shows no benefit either (gap +0.0112 vs +0.0110 for baseline; the gap is smaller than the all-window +0.014 for both arms because later windows are easier to predict, not because of pooling). The per-season breakdown flips sign (−0.0006 in 2023, +0.0010 in 2025), which reads as noise.
+
+**18-window screen (odd windows, n = 195), as run first:** baseline gap +0.0129, `lineup_loose_combo` +0.0117, multileague +0.0133. Paired multileague − baseline: +0.0004, CI [−0.0007, +0.0015]. Same conclusion, so the 35-window run was a confirmation, not a reversal.
+
+**vs the current best (WP009 `lineup_loose_combo`), full 35 windows, same 361 matches:** `lineup_loose_combo` RPS 0.1911, gap +0.0125 (CI [+0.0067, +0.0185]) against multileague's +0.0141. Paired multileague − `lineup_loose_combo` = +0.0015, CI [−0.0001, +0.0032]: multileague did not beat it and is if anything slightly worse, though the CI just includes zero. (For reference, paired baseline − `lineup_loose_combo` is +0.0014, CI [+0.0000, +0.0028], the same razor-thin edge WP009 reported.) **Correction to an earlier version of this section, which said WP009 never ran the full 35 windows: it did (`wp009_lineup_xg_validation/cv_checkpoint_full_lineup_loose_combo.pkl`, 401 matches). The notebook's Phase 3 cell seeds its `full_lineup_loose_combo` arm from WP009's 18-window screening checkpoint instead, which is why its last cell prints `lineup_loose_combo` at n=195 beside the other two arms at n=361. The notebook line should read `seed_from(WP009 / 'cv_checkpoint_full_lineup_loose_combo.pkl', ...)`; it has not been changed, so the notebook's printed `lineup_loose_combo` row is not like-for-like and the numbers above are the correct ones.**
+
+**Against expectations.** "What we'd expect to see" gave a moderate chance of a small, explainable improvement. That did not happen: no measurable improvement at all, and in particular none in the windows where pooling was actually active.
+
+**What this does not establish.**
+- **Why it didn't help is untested.** A plausible explanation is that `sigma_att`/`sigma_def` were not the binding constraint on EPL accuracy, consistent with WP010's finding that the gap is diffuse and probably information-limited. But no hyperparameter posteriors were saved in the checkpoints, so I can't say whether pooled `sigma_att`/`sigma_def`/`home_adv` actually differed from the EPL-only estimates. That is a hypothesis, not a finding.
+- **Only trimmed history was tested.** Non-EPL leagues had 3 seasons rather than EPL's 6. More history for those leagues could in principle give a larger effect; given how tight the CI is around zero I'd not expect it to be large, but this run doesn't test it.
+- **Convergence wasn't checked.** Checkpoints store only posterior means and scores, not R-hat/ESS/divergence counts, and the logs show no divergence warnings but I can't confirm numpyro would have printed them. PyMC also warned about running only 3 chains. Nothing in the results looks like a fit failure (the multileague arm matches the baseline almost exactly), but it isn't verified.
+
+**Verdict.** Multi-league pooling of the base hierarchical model does not recover the resolution gap to Pinnacle, and does not beat `lineup_loose_combo`. This is consistent with WP005/006/009/010's conclusion that the gap is not recoverable by changing the EPL model's structure: this WP tested the one option those left open (more independent teams for the hyperparameters), and it did not help.
+
 ## Practical cost
 
-The smoke test's 2-league, single-season window (465 training matches, ~38 teams total) sampled in 38.8s — a genuinely useful reference point, not just a guess: a full 5-league, 6-season run has roughly 5x the teams and a similar multiple of total matches, so expect each of the 35 walk-forward windows to take meaningfully longer than WP001–010's EPL-only windows (which this same hardware/sampler handled in comparable per-window time to what was just seen for 2 leagues). Data acquisition remains low-friction — same tooling, same discipline as WP007/WP008.
+The 35-window multileague CV took **72.1 minutes of wall time at `MAX_WORKERS=4`** (M2 Pro-class laptop; the machine was reported at thermal pressure "Heavy" partway through the run). Per-window sampling speed in the logs fell from ~18 it/s in early windows to ~5–8 it/s in late ones, which is consistent with thermal throttling but also with windows getting bigger as training data grows — this run can't separate the two, so treat 72 minutes as an upper-ish figure for this hardware rather than a clean benchmark. For comparison, the smoke test's 2-league, single-season window took 38.8s. No window timed out under `WINDOW_TIMEOUT = 1800`. The 18-window screen had already been run earlier and was loaded from its checkpoint, so its timing isn't in this record. Data acquisition remains low-friction — same tooling, same discipline as WP007/WP008.
 
-## What's left — not part of this implementation pass
+## What's left
 
-- **The actual WP009-style validation**: full 5-league, 6-season fetch, a `run_window_multileague`-driven 35-window walk-forward CV, and the same paired-bootstrap-vs-Pinnacle comparison against WP001's baseline and WP009's `lineup_loose_combo` this WP was scoped to produce. This is the real compute — yours to run, per this project's standing division of labor (I do data acquisition and all testing/plumbing; you run the walk-forward training).
-- League-inclusion decisions (see "League inclusion" above) get made once real 5-league data is actually fetched and looked at, not presumed here.
+Done in this WP: the 5-league fetch (all five leagues passed the data-quality bar), the 18-window screen, the 35-window CV, and the paired comparison against WP001's baseline and WP009's `lineup_loose_combo`. See "Results".
+
+Open, in order of how cheaply they would explain the null result:
+- **Save and inspect hyperparameter posteriors.** Refit one full-coverage window (e.g. window 25) recording `sigma_att`, `sigma_def`, `home_adv` and the league-level `mu`, and compare against the same window's EPL-only fit. If pooling barely moved them, that explains the null result directly; if it moved them a lot without changing predictions, the hyperparameters weren't the bottleneck. This is a single-window job.
+- **Longer non-EPL history** (6 seasons instead of 3) is the one untested version of the hypothesis. Expensive, and I would not expect it to change the result much given the CI, so do it only if the hyperparameter check suggests pooling did move something.
+- **Not worth pursuing on this evidence:** stacking `loose_combo` priors on the pooled model, or extending the lineup-xG covariate (WP008/009) to other leagues. Both build on pooling paying off, and it didn't.
 
 ## Reproducing
 

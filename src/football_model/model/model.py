@@ -136,6 +136,22 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
             lineup_contribution_home = 0.0
             lineup_contribution_away = 0.0
 
+        # --- Optional: lineup-continuity covariate (WP013) ---
+        # A side's defence continuity (how usual its keeper + back line is)
+        # affects its OPPONENT's scoring, so the home side's theta reads the
+        # AWAY side's continuity and vice versa. Normal(0, sd), not
+        # HalfNormal: the hypothesis has a direction (an unusual back line
+        # concedes more) but the data, not the prior, should decide the sign.
+        if config.use_continuity:
+            cont_home_data = pm.Data('defence_cont_home', data.defence_cont_home)
+            cont_away_data = pm.Data('defence_cont_away', data.defence_cont_away)
+            beta_continuity = pm.Normal('beta_continuity', mu=0.0, sigma=config.continuity_beta_sd)
+            continuity_contribution_home = beta_continuity * cont_away_data
+            continuity_contribution_away = beta_continuity * cont_home_data
+        else:
+            continuity_contribution_home = 0.0
+            continuity_contribution_away = 0.0
+
         # --- Linear predictors ---
         # NOTE: football_model.model.predict has a plain-numpy mirror of this
         # exact formula (compute_theta/predict_match_lambdas), used by both
@@ -146,6 +162,7 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
         theta_home = (
             xG_contribution_home
             + lineup_contribution_home
+            + continuity_contribution_home
             + attack[data.t_idx, data.team_idx]
             - defense[data.t_idx, data.opp_idx]
             + home_adv[data.team_idx] * data.home
@@ -154,6 +171,7 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
         theta_away = (
             xG_contribution_away
             + lineup_contribution_away
+            + continuity_contribution_away
             + attack[data.t_idx, data.opp_idx]
             - defense[data.t_idx, data.team_idx]
         )
@@ -219,6 +237,8 @@ def build_multileague_model(leagues: dict, config: ModelConfig = default_config)
     """
     if config.use_lineup_xg:
         raise NotImplementedError("build_multileague_model does not support use_lineup_xg (WP011 scope: base hierarchical model only)")
+    if config.use_continuity:
+        raise NotImplementedError("build_multileague_model does not support use_continuity (WP011 scope: base hierarchical model only)")
     if config.use_per_team_sigma:
         raise NotImplementedError("build_multileague_model does not support use_per_team_sigma (WP011 scope: base hierarchical model only)")
     if config.use_opponent_adjusted_xG:

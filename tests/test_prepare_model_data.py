@@ -273,3 +273,27 @@ def test_prepare_multileague_data_skips_league_with_no_matches_before_cutoff(
     )
     assert "Bundesliga" not in leagues
     assert "EPL" in leagues  # the eval league (never trimmed) is still present
+
+
+def test_continuity_defaults_to_zero_when_no_table_given(two_season_model_data):
+    md = two_season_model_data
+    assert (md.defence_cont_home == 0.0).all() and (md.defence_cont_away == 0.0).all()
+
+
+def test_continuity_table_joins_home_and_away_independently(engineered_two_season_df):
+    """A side's continuity lands in its own array (home team -> defence_cont_home,
+    away team -> defence_cont_away), matched on (team, date), and nothing
+    else picks up a value."""
+    df = engineered_two_season_df
+    sample = df[df["is_home"] == 1].iloc[0]
+    date = pd.Timestamp(sample["datetime"]).normalize()
+    table = pd.DataFrame([
+        {"team": sample["team_long"], "date": date, "continuity_z": 1.25},
+        {"team": sample["opp_team_long"], "date": date, "continuity_z": -0.75},
+    ])
+    md = prepare_model_data(df, max_round=df["round"].max(), continuity_table=table)
+    row = [i for i in range(len(md.match_idx)) if md.match_idx[i] == sample["match_id"]][0]
+    assert md.defence_cont_home[row] == pytest.approx(1.25)
+    assert md.defence_cont_away[row] == pytest.approx(-0.75)
+    others = [i for i in range(len(md.match_idx)) if i != row]
+    assert all(md.defence_cont_home[i] == 0.0 for i in others)

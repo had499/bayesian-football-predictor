@@ -38,6 +38,16 @@ class ModelData:
     lineup_dev_home: np.ndarray = None    # shape=(n_obs,)
     lineup_dev_away: np.ndarray = None    # shape=(n_obs,)
 
+    # --- lineup-continuity covariate (WP013) ---
+    # Each side's OWN standardised defence-unit continuity (how usual its
+    # keeper + back line is; see football_model.features.continuity_features).
+    # A side's continuity is what affects its OPPONENT's scoring, so the
+    # model reads `defence_cont_away` for the home side's theta and
+    # `defence_cont_home` for the away side's. Zero (the neutral, mean value
+    # after standardising) when unavailable, so always safe to read.
+    defence_cont_home: np.ndarray = None  # shape=(n_obs,)
+    defence_cont_away: np.ndarray = None  # shape=(n_obs,)
+
 from dataclasses import dataclass
 
 @dataclass(frozen=True)
@@ -84,6 +94,12 @@ class ModelConfig:
     # Lineup-quality covariate (WP008)
     # -------------------------
     use_lineup_xg: bool = False     # add beta_lineup * lineup_dev to theta (starting-XI xG/xA vs. team's own normal)
+
+    # -------------------------
+    # Lineup-continuity covariate (WP013)
+    # -------------------------
+    use_continuity: bool = False    # add beta_continuity * (OPPONENT's defence continuity, standardised) to theta
+    continuity_beta_sd: float = 0.1  # prior SD of beta_continuity (Normal(0, sd): sign is not forced)
 
     # -------------------------
     # Model options

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from run_cv_window import _validate_config_overrides  # noqa: E402
+from run_cv_window import _validate_config_overrides, run_window  # noqa: E402
 
 from football_model.types.model_data import ModelConfig  # noqa: E402
 
@@ -138,3 +138,16 @@ def test_run_windows_concurrent_failed_window_does_not_block_others(tmp_path):
     )
     ckpt2 = _load_checkpoint(ckpt_path2)
     assert ckpt2["results"] == []  # both failed, nothing merged, no crash
+
+
+# --- WP013: continuity covariate ---
+
+def test_run_window_refuses_use_continuity_without_a_table(engineered_two_season_df):
+    """Without the table the feature is all zeros and the arm would silently
+    run as the baseline while its checkpoint claimed use_continuity."""
+    df = engineered_two_season_df
+    last = int(df["round"].max())
+    window = {"train_start": 1, "train_end": last - 2, "test_start": last - 1, "test_end": last}
+    with pytest.raises(ValueError, match="continuity_table"):
+        run_window(df, window, 1, config_overrides={"use_continuity": True})
+

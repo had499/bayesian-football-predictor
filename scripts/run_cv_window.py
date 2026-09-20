@@ -68,9 +68,11 @@ def run_window(
     use_dc: bool = True,
     config_overrides: dict | None = None,
     lineup_dev_table: pd.DataFrame | None = None,
+    continuity_table: pd.DataFrame | None = None,
 ):
     train_data = prepare_model_data(
-        df_cv, max_round=window["train_end"], lineup_dev_table=lineup_dev_table
+        df_cv, max_round=window["train_end"], lineup_dev_table=lineup_dev_table,
+        continuity_table=continuity_table,
     )
 
     config_overrides = _validate_config_overrides(dict(config_overrides or {}))
@@ -78,6 +80,10 @@ def run_window(
         clip_theta=5.0, center_team_strength=False, use_dixon_coles=use_dc, use_xG=use_xg,
         **config_overrides,
     )
+    if config.use_continuity and (continuity_table is None or len(continuity_table) == 0):
+        # Without the table the feature is all zeros: beta_continuity would
+        # just sample its prior and the arm would silently be the baseline.
+        raise ValueError("use_continuity=True but the shared-data pickle has no 'continuity_table'")
     model_cv = build_model(train_data, config)
 
     with model_cv:
@@ -136,8 +142,14 @@ def run_window(
     if config.use_lineup_xg:
         beta_lineup_mean_cv = float(trace_cv.posterior["beta_lineup"].mean(dim=["chain", "draw"]).values)
 
+    # WP013: same story again for the continuity covariate.
+    beta_continuity_mean_cv = None
+    if config.use_continuity:
+        beta_continuity_mean_cv = float(trace_cv.posterior["beta_continuity"].mean(dim=["chain", "draw"]).values)
+
     full_data = prepare_model_data(
-        df_cv, max_round=window["test_end"], lineup_dev_table=lineup_dev_table
+        df_cv, max_round=window["test_end"], lineup_dev_table=lineup_dev_table,
+        continuity_table=continuity_table,
     )
 
     last_t_cv = attack_mean_cv.shape[0] - 1
@@ -164,6 +176,7 @@ def run_window(
         use_opponent_adjusted_xG=config.use_opponent_adjusted_xG,
         xG_adjustment_strength=config.xG_adjustment_strength,
         beta_lineup=beta_lineup_mean_cv,
+        beta_continuity=beta_continuity_mean_cv,
     )
     test_goals_home_cv = full_data.goals_home[test_rows]
     test_goals_away_cv = full_data.goals_away[test_rows]
@@ -226,6 +239,7 @@ def run_window(
         "sigma_att_team": sigma_att_team_map,  # None unless use_per_team_sigma
         "sigma_def_team": sigma_def_team_map,
         "beta_lineup": beta_lineup_mean_cv,  # None unless use_lineup_xg
+        "beta_continuity": beta_continuity_mean_cv,  # None unless use_continuity
     }
     return result, match_predictions
 
@@ -375,6 +389,7 @@ def run_window_multileague(
         "sigma_att_team": None,  # WP011 doesn't support use_per_team_sigma
         "sigma_def_team": None,
         "beta_lineup": None,     # WP011 doesn't support use_lineup_xg
+        "beta_continuity": None,  # ...or use_continuity
         "eval_league": eval_league,
         "leagues_available": sorted(dfs_by_league),  # every league passed in
         "leagues_used": sorted(train_leagues),        # leagues ACTUALLY trained on this
@@ -546,6 +561,8 @@ def main():
         # lineup covariate exactly like not passing it at all
         # (prepare_model_data's own default).
         lineup_dev_table = shared.get("lineup_dev_table")
+        # WP013: same pattern for the continuity covariate.
+        continuity_table = shared.get("continuity_table")
 
         print(
             f"[window {args.window_index}/{len(windows)}] "
@@ -555,6 +572,7 @@ def main():
         result, match_predictions = run_window(
             df_cv, window, args.window_index, use_xg=args.use_xg, use_dc=args.use_dc,
             config_overrides=config_overrides, lineup_dev_table=lineup_dev_table,
+            continuity_table=continuity_table,
         )
     print(
         f"[window {args.window_index}] MAE={result['mae']:.3f} "

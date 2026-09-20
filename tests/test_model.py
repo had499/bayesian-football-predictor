@@ -241,7 +241,7 @@ def test_build_multileague_model_with_xg_and_dixon_coles(two_season_model_data, 
 
 def test_build_multileague_model_rejects_out_of_scope_config(two_season_model_data, league2_model_data):
     leagues = {"EPL": two_season_model_data, "Bundesliga": league2_model_data}
-    for kwargs in [dict(use_lineup_xg=True), dict(use_per_team_sigma=True), dict(use_opponent_adjusted_xG=True)]:
+    for kwargs in [dict(use_lineup_xg=True), dict(use_continuity=True), dict(use_per_team_sigma=True), dict(use_opponent_adjusted_xG=True)]:
         with pytest.raises(NotImplementedError):
             build_multileague_model(leagues, _multileague_config(**kwargs))
 
@@ -269,3 +269,41 @@ def test_build_multileague_model_league_independence_graph_structure(two_season_
         assert f"att_0_{own}" in att_ancestors
         assert "rho_att" in att_ancestors
         assert "sigma_att" in att_ancestors
+
+
+# --- WP013: lineup-continuity covariate ---
+
+def _with_continuity(model_data, seed=0):
+    import dataclasses
+    rng = np.random.default_rng(seed)
+    n = len(model_data.t_idx)
+    return dataclasses.replace(
+        model_data,
+        defence_cont_home=rng.normal(size=n).astype("float32"),
+        defence_cont_away=rng.normal(size=n).astype("float32"),
+    )
+
+
+def test_use_continuity_registers_beta_continuity(two_season_model_data):
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True, use_continuity=True)
+    model = build_model(_with_continuity(two_season_model_data), config)
+    assert "beta_continuity" in {rv.name for rv in model.free_RVs}
+
+
+def test_use_continuity_false_registers_no_beta_continuity(two_season_model_data):
+    """Default behaviour (every config before WP013) must be unchanged."""
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True)
+    model = build_model(two_season_model_data, config)
+    assert "beta_continuity" not in {rv.name for rv in model.free_RVs}
+
+
+def test_use_continuity_builds_and_samples_with_either_sign(two_season_model_data):
+    config = ModelConfig(center_team_strength=False, soft_center_team_strength=True, use_continuity=True)
+    model = build_model(_with_continuity(two_season_model_data), config)
+    with model:
+        idata = pm.sample_prior_predictive(draws=200, random_seed=0)
+        trace = pm.sample(draws=3, tune=3, chains=1, cores=1, progressbar=False, random_seed=0)
+    assert np.isfinite(idata.prior["lambda_home"].values).all()
+    assert np.isfinite(trace.posterior["beta_continuity"].values).all()
+    b = idata.prior["beta_continuity"].values
+    assert (b < 0).any() and (b > 0).any()   # Normal prior: the data, not the prior, decides the sign

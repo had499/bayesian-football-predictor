@@ -86,6 +86,7 @@ def prepare_multileague_data(
 def prepare_model_data(
     df: pd.DataFrame, max_round, season_start_window: int = 5,
     lineup_dev_table: pd.DataFrame = None,
+    continuity_table: pd.DataFrame = None,
 ) -> ModelData:
     """`lineup_dev_table` (WP008, optional): the output of
     football_model.features.lineup_features.build_lineup_deviation_table —
@@ -226,6 +227,24 @@ def prepare_model_data(
         lineup_dev_home = np.zeros(len(df_obs))
         lineup_dev_away = np.zeros(len(df_obs))
 
+    # WP013: same join, same neutral default. `continuity_table` has columns
+    # `team` (full name), `date`, `continuity_z` (standardised defence
+    # continuity, NaN already mapped to 0 — see
+    # football_model.features.continuity_features.continuity_feature_table).
+    if continuity_table is not None and len(continuity_table) > 0:
+        ct_dates = pd.to_datetime(continuity_table["date"]).dt.normalize()
+        cont_map = dict(zip(zip(continuity_table["team"], ct_dates), continuity_table["continuity_z"]))
+        obs_dates_c = df_obs["datetime"].dt.normalize()
+        defence_cont_home = np.array(
+            [cont_map.get((t, d), 0.0) for t, d in zip(df_obs["team_long"], obs_dates_c)]
+        )
+        defence_cont_away = np.array(
+            [cont_map.get((t, d), 0.0) for t, d in zip(df_obs["opp_team_long"], obs_dates_c)]
+        )
+    else:
+        defence_cont_home = np.zeros(len(df_obs))
+        defence_cont_away = np.zeros(len(df_obs))
+
     return ModelData(
         n_teams=n_teams,
         n_matches=n_matches,
@@ -244,4 +263,6 @@ def prepare_model_data(
         season_start_mask=season_start_mask,
         lineup_dev_home=lineup_dev_home.astype("float32"),
         lineup_dev_away=lineup_dev_away.astype("float32"),
+        defence_cont_home=defence_cont_home.astype("float32"),
+        defence_cont_away=defence_cont_away.astype("float32"),
     )
