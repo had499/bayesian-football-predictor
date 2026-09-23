@@ -10,3 +10,6 @@ __pycache__/
 /services/predictor/data/
 *.pkl
 *.nc
+`# WP007 sweep artefacts (per-window checkpoints + logs; regenerable via run_cv.py)
+work_products/wp007_structural_fixes/checkpoints/
+work_products/wp007_structural_fixes/*.log

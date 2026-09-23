@@ -9,6 +9,7 @@ from football_model.model.components import (
     dixon_coles_tau,
     masked_mean_over_teams,
     soft_clip,
+    xg_measurement_channel,
 )
 
 
@@ -219,8 +220,8 @@ def test_dixon_coles_tau_matches_hand_computed_values():
 
     expected = np.array([
         1 - lam * mu * rho,   # 0-0
-        1 + lam * rho,        # 1-0
-        1 + mu * rho,         # 0-1
+        1 + mu * rho,         # 1-0: away side scored the 0 -> away rate (mu)
+        1 + lam * rho,        # 0-1: home side scored the 0 -> home rate (lam)
         1 - rho,               # 1-1
         1.0,                   # 2-2: untouched
         1.0,                   # 3-0: untouched
@@ -258,3 +259,61 @@ def test_dixon_coles_adjustment_adds_rho_and_matches_log_tau():
     expected_logp = pt.log(tau_expected).sum().eval()
 
     assert np.isclose(float(actual_logp), float(expected_logp))
+
+
+def test_dixon_coles_tau_keeps_joint_distribution_normalised():
+    """Regression for the pre-WP007 bug: with the two single-goal cells'
+    rates swapped, sum_{x,y} pois(x;lam)*pois(y;mu)*tau = 1 + rho*(lam-mu)^2
+    *exp(-lam-mu) != 1 whenever lam != mu — an improper likelihood every
+    match. The correct tau sums to exactly 1 for ANY lam, mu, rho."""
+    from scipy.stats import poisson
+
+    g = np.arange(0, 40)
+    gh, ga = np.meshgrid(g, g, indexing="ij")
+    for lam, mu, rho in [(1.5, 1.1, 0.05), (2.4, 0.7, -0.08), (3.0, 0.6, 0.1), (1.2, 1.2, 0.05)]:
+        joint = np.outer(poisson.pmf(g, lam), poisson.pmf(g, mu))
+        tau = dixon_coles_tau(lam, mu, gh, ga, rho).eval()
+        assert np.isclose((joint * tau).sum(), 1.0, atol=1e-10), (lam, mu, rho)
+
+
+def test_ar1_entry_shift_applies_once_at_reactivation():
+    """entry_shift is added in exactly the round a team goes inactive->active
+    (a promotion), then persists through the walk — checked against a manual
+    recursion, with sigma=0 so only the shift moves the state."""
+    n_time, n_teams = 8, 2
+    active = np.ones((n_time, n_teams), dtype="float32")
+    active[2:5, 1] = 0.0          # team 1 absent for t=2..4, re-enters at t=5
+    with pm.Model():
+        ar1_team_process("x", n_time, n_teams, sigma=0.0, rho=1.0, active_mask=active,
+                         init_scale=0.2, entry_shift=-0.4)
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+    x = idata.prior["x"].values[0, 0]
+    x0 = idata.prior["x_std"].values[0, 0][0] * 0.2
+    assert np.allclose(x[:, 0], x0[0])                      # team 0 never entered: flat
+    assert np.allclose(x[:5, 1], x0[1])                     # frozen through the absence
+    assert np.allclose(x[5:, 1], x0[1] - 0.4)               # shift lands at t=5, then persists
+
+
+def test_ar1_entry_shift_zero_is_a_noop_for_always_active_teams():
+    a = _draw_ar1(6, 3, active_mask=np.ones((6, 3)), seed=11)
+    b = _draw_ar1(6, 3, active_mask=None, seed=11)
+    assert np.allclose(a, b)
+
+
+def test_xg_measurement_channel_registers_and_scores_a_gamma():
+    from scipy.stats import gamma as sp_gamma
+
+    lam_h, lam_a = np.array([1.4, 0.9]), np.array([1.1, 1.6])
+    xg_h, xg_a = np.array([1.2, 1.0]), np.array([0.8, 2.0])
+    with pm.Model() as model:
+        pot = xg_measurement_channel(
+            pt.as_tensor_variable(lam_h), pt.as_tensor_variable(lam_a), xg_h, xg_a, weight=0.5,
+        )
+        assert {"xg_shape", "xg_kappa"} <= {rv.name for rv in model.free_RVs}
+        k, kappa = 4.0, 1.05
+        actual = float(pot.eval({model["xg_shape"]: k, model["xg_kappa"]: kappa}))
+    expected = 0.5 * sum(
+        sp_gamma.logpdf(x, a=k, scale=(kappa * lam) / k).sum()
+        for lam, x in ((lam_h, xg_h), (lam_a, xg_a))
+    )
+    assert np.isclose(actual, expected)

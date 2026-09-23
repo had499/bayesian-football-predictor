@@ -6,6 +6,16 @@ default_config = ModelConfig()
 
 def build_model(data: ModelData , config: ModelConfig = default_config):
 
+    if config.use_form_decomposition and (
+        config.dynamics != "ar1_static" or config.use_promoted_effect
+    ):
+        raise ValueError(
+            "dynamics='random_walk' and use_promoted_effect only apply to the "
+            "standard (non-form-decomposition) branch"
+        )
+    if config.use_xg_channel and data.xG_obs_home is None:
+        raise ValueError("use_xg_channel needs ModelData.xG_obs_home/away (prepare_model_data fills them)")
+
     with pm.Model() as model:
 
         # --- Priors ---
@@ -86,9 +96,20 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
                 attack = pm.Deterministic('attack', att_0 + att_ability + att_form)
                 defense = pm.Deterministic('defence', def_0 + def_ability + def_form)
         else:
-            # Standard single AR(1) process
-            rho_att = rho_prior("att", config.rho_att_alpha, config.rho_att_beta)
-            rho_def = rho_prior("def", config.rho_def_alpha, config.rho_def_beta)
+            # Standard single latent process per team/side. Two dynamics:
+            #   "ar1_static"  (default, everything up to WP006): att_0 + AR(1)
+            #                 that reverts toward it (rho ~ Beta(29,1)).
+            #   "random_walk" (WP007): no static term, rho == 1 — the level
+            #                 itself wanders. See ModelConfig.dynamics.
+            random_walk = config.dynamics == "random_walk"
+            if config.dynamics not in ("ar1_static", "random_walk"):
+                raise ValueError(f"unknown dynamics {config.dynamics!r}")
+
+            if random_walk:
+                rho_att = rho_def = 1.0
+            else:
+                rho_att = rho_prior("att", config.rho_att_alpha, config.rho_att_beta)
+                rho_def = rho_prior("def", config.rho_def_alpha, config.rho_def_beta)
 
             if config.use_per_team_sigma:
                 # Partial pooling (WP006): each team gets its own innovation
@@ -103,36 +124,49 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
                 sigma_att = pm.HalfNormal("sigma_att", config.sigma_att)
                 sigma_def = pm.HalfNormal("sigma_def", config.sigma_def)
 
-            att_0 = team_strength_prior("att_0", data.n_teams, scale=config.init_scale)
-            def_0 = team_strength_prior("def_0", data.n_teams, scale=config.init_scale)
+            if config.use_promoted_effect:
+                promo_att = pm.Normal("promo_att", 0.0, config.promoted_effect_sd)
+                promo_def = pm.Normal("promo_def", 0.0, config.promoted_effect_sd)
+            else:
+                promo_att = promo_def = 0.0
 
             # --- Latent dynamics ---
-            att_rw = ar1_team_process(
-                "att_rw",
-                data.n_time,
-                data.n_teams,
-                sigma_att,
-                rho_att,
+            # init_scale for the walk's own t=0 value: 0.2 (the function's
+            # default, unchanged) under ar1_static; rw_init_scale under
+            # random_walk, where this IS the team's whole level prior.
+            walk_kwargs = dict(
                 active_mask=data.active_mask,
                 season_start_mask=data.season_start_mask,
                 season_start_sigma_mult=config.season_start_sigma_mult,
+            )
+            if random_walk:
+                walk_kwargs["init_scale"] = config.rw_init_scale
+            att_rw = ar1_team_process(
+                "att_rw", data.n_time, data.n_teams, sigma_att, rho_att,
+                entry_shift=promo_att, **walk_kwargs,
             )
             def_rw = ar1_team_process(
-                "def_rw",
-                data.n_time,
-                data.n_teams,
-                sigma_def,
-                rho_def,
-                active_mask=data.active_mask,
-                season_start_mask=data.season_start_mask,
-                season_start_sigma_mult=config.season_start_sigma_mult,
+                "def_rw", data.n_time, data.n_teams, sigma_def, rho_def,
+                entry_shift=promo_def, **walk_kwargs,
             )
-            if config.center_team_strength == True:
-                attack = centered_over_teams(att_0 + att_rw, "attack", active_mask=data.active_mask)
-                defense = centered_over_teams(def_0 + def_rw, "defence", active_mask=data.active_mask)
+            if random_walk:
+                attack_raw, defense_raw = att_rw, def_rw
             else:
-                attack = pm.Deterministic('attack',att_0 + att_rw)
-                defense = pm.Deterministic('defence',def_0 + def_rw)
+                att_0 = team_strength_prior("att_0", data.n_teams, scale=config.init_scale)
+                def_0 = team_strength_prior("def_0", data.n_teams, scale=config.init_scale)
+                attack_raw, defense_raw = att_0 + att_rw, def_0 + def_rw
+
+            if config.center_team_strength == True:
+                # Keep the UN-centred latent state too: forecasting a round
+                # beyond the trained window must roll the raw walk forward and
+                # re-centre over that round's own active set (predict.py).
+                pm.Deterministic("attack_raw", attack_raw)
+                pm.Deterministic("defence_raw", defense_raw)
+                attack = centered_over_teams(attack_raw, "attack", active_mask=data.active_mask)
+                defense = centered_over_teams(defense_raw, "defence", active_mask=data.active_mask)
+            else:
+                attack = pm.Deterministic('attack', attack_raw)
+                defense = pm.Deterministic('defence', defense_raw)
 
         # --- Soft identifiability constraint (only when uncentered) ---
         # Without centering, the model is weakly identified in a "drift" direction:
@@ -193,6 +227,12 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
             xG_contribution_home = 0.0
             xG_contribution_away = 0.0
 
+        # --- Optional: explicit log-rate intercept (WP007) ---
+        if config.use_intercept:
+            intercept = pm.Normal("intercept", config.intercept_mu, config.intercept_sd)
+        else:
+            intercept = 0.0
+
         # --- Linear predictors ---
         # NOTE: football_model.model.predict has a plain-numpy mirror of this
         # exact formula (compute_theta/predict_match_lambdas), used by both
@@ -201,14 +241,16 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
         # PyTensor code here can't run outside a pm.Model context, so it's
         # kept in sync by hand. If this formula changes, update that module too.
         theta_home = (
-            xG_contribution_home
+            intercept
+            + xG_contribution_home
             + attack[data.t_idx, data.team_idx]
             - defense[data.t_idx, data.opp_idx]
             + home_adv[data.team_idx] * data.home
         )
 
         theta_away = (
-            xG_contribution_away
+            intercept
+            + xG_contribution_away
             + attack[data.t_idx, data.opp_idx]
             - defense[data.t_idx, data.team_idx]
         )
@@ -240,6 +282,15 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
         if config.use_dixon_coles:
             dixon_coles_adjustment(
                 lambda_home, lambda_away, data.goals_home, data.goals_away, config.rho_dc_sd
+            )
+
+        # --- Optional: xG as a second measurement of the same latent rate (WP007) ---
+        if config.use_xg_channel:
+            xg_measurement_channel(
+                lambda_home, lambda_away, data.xG_obs_home, data.xG_obs_away,
+                weight=config.xg_channel_weight,
+                shape_alpha=config.xg_channel_shape_alpha,
+                shape_beta=config.xg_channel_shape_beta,
             )
 
     return model

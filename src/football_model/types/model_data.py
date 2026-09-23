@@ -30,6 +30,13 @@ class ModelData:
     active_mask: np.ndarray = None        # shape=(n_time, n_teams); 1 if team is in the league at time t, else 0
     season_start_mask: np.ndarray = None  # shape=(n_time,); 1 if t falls in a season's opening window
 
+    # --- realised in-match xG, one per side (WP007 xG measurement channel) ---
+    # Distinct from xG_home/xG_away above, which are leak-free ROLLING BASELINES
+    # used as a predictor. These are the match's own outcome-side xG: an
+    # observation for training rows, never a predictor for the row itself.
+    xG_obs_home: np.ndarray = None        # shape=(n_obs,)
+    xG_obs_away: np.ndarray = None        # shape=(n_obs,)
+
 from dataclasses import dataclass
 
 @dataclass(frozen=True)
@@ -118,3 +125,39 @@ class ModelConfig:
     # -------------------------
     use_dixon_coles: bool = False   # correct 0-0/1-0/0-1/1-1 for home/away goal correlation
     rho_dc_sd: float = 0.1          # prior scale for the learned correlation parameter
+
+    # -------------------------
+    # WP007 structural changes (all opt-in; defaults reproduce earlier configs)
+    # -------------------------
+    # Latent-strength dynamics. "ar1_static" = per-team static att_0 + a
+    # fast-reverting AR(1) around it (everything up to WP006). "random_walk" =
+    # no static term, rho fixed at 1: a team's level itself wanders. Real
+    # year-on-year attack change is SD ~0.12 (noise-corrected) vs ~0.04 the
+    # prior-implied change of the AR(1)+static structure, and no single sigma
+    # knob fixes that — the reversion to a static mean is the constraint.
+    # Only affects the standard (non-form-decomposition) branch.
+    dynamics: str = "ar1_static"    # "ar1_static" | "random_walk"
+    rw_init_scale: float = 0.3      # SD of a team's t=0 level under random_walk
+
+    # A team's level shifts by a learned amount in the round it (re)enters the
+    # league (promoted sides are ~-0.37 attack / ~-0.26 defence vs continuing
+    # teams; N(0, init) says "average"). One shared shift each for attack and
+    # defence, prior N(0, promoted_effect_sd).
+    use_promoted_effect: bool = False
+    promoted_effect_sd: float = 0.25
+
+    # Explicit log-rate intercept. With hard centering (center_team_strength
+    # =True) attack/defence sum to zero, leaving the overall goal level with
+    # NO free parameter — the default config implied 1.14 home / 1.00 away vs
+    # ~1.54 / ~1.26 actual. Prior centred on log(1.35) league-average away rate.
+    use_intercept: bool = False
+    intercept_mu: float = 0.30
+    intercept_sd: float = 0.25
+
+    # xG as a second, tempered measurement channel on the same latent rate
+    # (see components.xg_measurement_channel). Needs ModelData.xG_obs_*.
+    use_xg_channel: bool = False
+    xg_channel_weight: float = 0.5
+    xg_channel_shape_alpha: float = 2.0
+    xg_channel_shape_beta: float = 0.5
+

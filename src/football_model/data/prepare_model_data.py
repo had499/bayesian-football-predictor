@@ -31,34 +31,33 @@ def prepare_model_data(df: pd.DataFrame, max_round, season_start_window: int = 5
 
     # Calculate team-level xG features using ONLY historical data (no data leakage)
     # For each match at time t, use team's average xG from matches BEFORE time t
-    team_xg_at_t = np.zeros((n_time, n_teams))  # (time, team) array
-    team_xga_at_t = np.zeros((n_time, n_teams))  # xG allowed
+    # (strictly t' < t), from both perspectives so a team's home and away
+    # matches both count. Vectorised with cumulative sums — this used to be a
+    # per-(t, team) pandas filter (~n_time*n_teams full-frame scans per call),
+    # which dominated runtime once training spans 10+ seasons. Semantics are
+    # unchanged (see tests/test_prepare_model_data.py's slow reference).
+    league_avg_xg = 1.5  # Reasonable default where a team has no history yet
 
-    # Initialize with league average for time 0
-    league_avg_xg = 1.5  # Reasonable default
-    team_xg_at_t[0, :] = league_avg_xg
-    team_xga_at_t[0, :] = league_avg_xg
+    tt = df_train["t"].to_numpy(int)
+    tid = df_train["team_id"].to_numpy(int)
+    oid = df_train["opp_id"].to_numpy(int)
+    xg_row = df_train["xG"].to_numpy(float)
 
-    # Build rolling averages (using expanding window) from both perspectives,
-    # so each team's home and away matches both count toward its history.
-    for t in range(1, n_time):
-        # For each team, calculate average xG from all matches up to (but not including) time t
-        historical_data = df_train[df_train["t"] < t]
+    sum_f = np.zeros((n_time, n_teams)); cnt_f = np.zeros((n_time, n_teams))
+    sum_a = np.zeros((n_time, n_teams)); cnt_a = np.zeros((n_time, n_teams))
+    np.add.at(sum_f, (tt, tid), xg_row); np.add.at(cnt_f, (tt, tid), 1.0)  # team's own attacking xG
+    np.add.at(sum_a, (tt, oid), xg_row); np.add.at(cnt_a, (tt, oid), 1.0)  # xG allowed (team as opponent)
 
-        for team_id in range(n_teams):
-            # Team's attacking xG (when they are the team)
-            team_matches = historical_data[historical_data["team_id"] == team_id]
-            if len(team_matches) > 0:
-                team_xg_at_t[t, team_id] = team_matches["xG"].mean()
-            else:
-                team_xg_at_t[t, team_id] = league_avg_xg
+    def _expanding_mean_before(sums, cnts):
+        cs, cc = np.cumsum(sums, axis=0), np.cumsum(cnts, axis=0)
+        out = np.full((n_time, n_teams), league_avg_xg)
+        # row t uses everything up to and including t-1
+        np.divide(cs[:-1], cc[:-1], out=out[1:], where=cc[:-1] > 0)
+        out[1:][cc[:-1] == 0] = league_avg_xg
+        return out
 
-            # Team's defensive xG allowed (when they are opponent)
-            opp_matches = historical_data[historical_data["opp_id"] == team_id]
-            if len(opp_matches) > 0:
-                team_xga_at_t[t, team_id] = opp_matches["xG"].mean()
-            else:
-                team_xga_at_t[t, team_id] = league_avg_xg
+    team_xg_at_t = _expanding_mean_before(sum_f, cnt_f)    # (time, team)
+    team_xga_at_t = _expanding_mean_before(sum_a, cnt_a)   # xG allowed
 
     # Active-team mask & season-start window.
     # A team is "active" at time t if it played any match in the season that
@@ -128,6 +127,11 @@ def prepare_model_data(df: pd.DataFrame, max_round, season_start_window: int = 5
         goals_away=df_obs["goals_away"].values.astype("int32"),
         xG_home=xG_home_baseline.astype("float32"),
         xG_away=xG_away_baseline.astype("float32"),
+        # Realised in-match xG (an observation, for the WP007 measurement
+        # channel) — floored at 0.02 so a Gamma log-density stays finite for
+        # the odd xG==0.00 row. Not a predictor for the match itself.
+        xG_obs_home=np.clip(df_obs["xG_home"].to_numpy(float), 0.02, None).astype("float32"),
+        xG_obs_away=np.clip(df_obs["xG_away"].to_numpy(float), 0.02, None).astype("float32"),
         team_mapping=team_idx_map,
         active_mask=active_mask,
         season_start_mask=season_start_mask,

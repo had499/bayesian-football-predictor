@@ -131,3 +131,68 @@ def test_form_decomposition_branch_builds(two_season_model_data):
     with model:
         idata = pm.sample_prior_predictive(draws=2, random_seed=0)
     assert np.isfinite(idata.prior["attack"].values).all()
+
+
+def _cfg(**kw):
+    return ModelConfig(center_team_strength=False, soft_center_team_strength=True, **kw)
+
+
+def test_random_walk_dynamics_drops_static_level_and_rho(two_season_model_data):
+    model = build_model(two_season_model_data, _cfg(dynamics="random_walk"))
+    free = {rv.name for rv in model.free_RVs}
+    assert not ({"att_0", "def_0", "rho_att", "rho_def"} & free)
+    assert {"sigma_att", "sigma_def", "att_rw_std"} <= free
+
+
+def test_default_dynamics_unchanged(two_season_model_data):
+    free = {rv.name for rv in build_model(two_season_model_data, _cfg()).free_RVs}
+    assert {"att_0", "def_0", "rho_att", "rho_def"} <= free
+    assert not ({"promo_att", "intercept", "xg_shape"} & free)
+
+
+def test_random_walk_promoted_effect_intercept_xg_channel_build_and_sample(two_season_model_data):
+    config = ModelConfig(dynamics="random_walk", sigma_att=0.05, sigma_def=0.05, use_promoted_effect=True,
+                         use_intercept=True, use_xg_channel=True, use_dixon_coles=True,
+                         center_team_strength=True)
+    model = build_model(two_season_model_data, config)
+    free = {rv.name for rv in model.free_RVs}
+    assert {"promo_att", "promo_def", "intercept", "xg_shape", "xg_kappa", "rho_dc"} <= free
+    assert {"attack_raw", "defence_raw"} <= {d.name for d in model.deterministics}
+    with model:
+        trace = pm.sample(draws=3, tune=3, chains=1, cores=1, progressbar=False, random_seed=0)
+    for v in ("promo_att", "intercept", "xg_shape", "lambda_home"):
+        assert np.isfinite(trace.posterior[v].values).all()
+
+
+def test_promoted_shift_reaches_the_newly_promoted_teams_latent_state(two_season_model_data):
+    """E enters in season 2; with a big fixed shift its attack at entry must
+    drop by exactly that amount relative to its (frozen) pre-entry value."""
+    md = two_season_model_data
+    model = build_model(md, _cfg(dynamics="random_walk", use_promoted_effect=True, sigma_att=1e-6))
+    e = md.team_mapping["E"]
+    entry_t = int(np.argmax((md.active_mask[:, e] > 0) & (np.arange(md.n_time) > 0)))
+    with model:
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+    att = idata.prior["attack"].values[0, 0, :, e]
+    shift = float(idata.prior["promo_att"].values[0, 0])
+    assert np.isclose(att[entry_t] - att[entry_t - 1], shift, atol=1e-3)
+
+
+def test_xg_channel_without_realised_xg_raises_clearly(two_season_model_data):
+    import dataclasses
+
+    md = dataclasses.replace(two_season_model_data, xG_obs_home=None, xG_obs_away=None)
+    try:
+        build_model(md, _cfg(use_xg_channel=True))
+    except ValueError as e:
+        assert "xG_obs" in str(e)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_form_decomposition_rejects_random_walk_options(two_season_model_data):
+    try:
+        build_model(two_season_model_data, _cfg(use_form_decomposition=True, use_promoted_effect=True))
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError")

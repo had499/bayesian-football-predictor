@@ -111,3 +111,42 @@ def test_goals_home_matches_true_home_team_score(engineered_two_season_df, two_s
         home_team = idx_to_team[md.team_idx[i]]
         assert md.goals_home[i] == true_goals_by_match.loc[match_id]
         assert home_rows.set_index("match_id").loc[match_id, "team"] == home_team
+
+
+def _slow_reference_xg_baselines(df_train, n_time, n_teams):
+    """The original per-(t, team) pandas-filter implementation, kept as the
+    ground truth the vectorised cumulative-sum version must reproduce."""
+    xg = np.full((n_time, n_teams), 1.5)
+    xga = np.full((n_time, n_teams), 1.5)
+    for t in range(1, n_time):
+        hist = df_train[df_train["t"] < t]
+        for team in range(n_teams):
+            tm = hist[hist["team_id"] == team]
+            if len(tm):
+                xg[t, team] = tm["xG"].mean()
+            om = hist[hist["opp_id"] == team]
+            if len(om):
+                xga[t, team] = om["xG"].mean()
+    return xg, xga
+
+
+def test_vectorised_xg_baseline_matches_slow_reference(engineered_two_season_df, two_season_model_data):
+    md = two_season_model_data
+    df = engineered_two_season_df.sort_values("datetime").reset_index(drop=True)
+    df["team_id"] = df["team"].map(md.team_mapping)
+    df["opp_id"] = df["opp_team"].map(md.team_mapping)
+    df["t"] = df["cum_round"].astype(int)
+    xg, xga = _slow_reference_xg_baselines(df, md.n_time, md.n_teams)
+
+    home = df[df["is_home"] == 1]
+    t, h, a = home["t"].to_numpy(), home["team_id"].to_numpy(), home["opp_id"].to_numpy()
+    assert np.allclose(md.xG_home, (xg[t, h] + xga[t, a]) / 2, atol=1e-5)
+    assert np.allclose(md.xG_away, (xg[t, a] + xga[t, h]) / 2, atol=1e-5)
+
+
+def test_realised_xg_observations_are_present_and_floored(two_season_model_data):
+    md = two_season_model_data
+    assert md.xG_obs_home.shape == md.goals_home.shape == md.xG_obs_away.shape
+    assert (md.xG_obs_home >= 0.02).all() and (md.xG_obs_away >= 0.02).all()
+    # fixture sets xG = goals + 0.1, so the realised xG must track the goals
+    assert np.allclose(md.xG_obs_home, md.goals_home + 0.1, atol=1e-5)

@@ -12,8 +12,19 @@ def ar1_team_process(
     season_start_mask=None,
     season_start_sigma_mult=1.0,
     init_scale=0.2,
+    entry_shift=0.0,
 ):
     """Non-centered AR(1) random walk per team.
+
+    entry_shift: scalar added to a team's latent value in the one round where
+        it flips from inactive to active (a promoted team's first round —
+        WP007). Real promoted sides start well below the league average
+        (~-0.37 attack / ~-0.26 defence in log-goal terms, 33 team-seasons),
+        but a prior of N(0, init_scale) says "average team". The shift is
+        applied once, at entry, and then persists through the walk — rather
+        than being a first-season-only offset that would have to vanish
+        abruptly in season two. 0.0 (default) leaves every earlier config's
+        recursion exactly unchanged. Pass a pm random variable to learn it.
 
     active_mask: optional (n_time, n_teams) 0/1 array. Where a team is
         inactive (e.g. relegated), the walk is frozen at its last active
@@ -51,9 +62,12 @@ def ar1_team_process(
     # a (n_teams,) sigma -> (n_time, n_teams), one column per team.
     sigma_t = sigma * (1.0 + (season_start_sigma_mult - 1.0) * season_arr[:, None])
 
+    # 1.0 exactly where a team is active at t but was not at t-1.
+    entry_arr = active_arr[1:] * (1.0 - active_arr[:-1])
+
     # Use scan instead of Python loop for efficiency with many time steps
-    def step(z_t, active_t, sigma_t_val, x_prev, rho):
-        x_new = rho * x_prev + sigma_t_val * z_t
+    def step(z_t, active_t, sigma_t_val, entry_t, x_prev, rho, shift):
+        x_new = rho * x_prev + sigma_t_val * z_t + entry_t * shift
         # Freeze at last value while the team is inactive (out of the league)
         return pt.switch(active_t > 0, x_new, x_prev)
 
@@ -63,9 +77,9 @@ def ar1_team_process(
     # Scan over remaining time steps (t=1 to n_time-1)
     x_rest = scan(
         fn=step,
-        sequences=[z[1:], active_arr[1:], sigma_t[1:]],
+        sequences=[z[1:], active_arr[1:], sigma_t[1:], entry_arr],
         outputs_info=[x_init],
-        non_sequences=[rho],
+        non_sequences=[rho, entry_shift],
         n_steps=n_time - 1,
         strict=True,
         return_updates=False,
@@ -121,6 +135,16 @@ def dixon_coles_tau(lambda_home, lambda_away, goals_home, goals_away, rho):
     1-1), where it nudges the joint probability to correct for the
     correlation an independent home/away Poisson likelihood can't capture
     (e.g. a leading team sitting back late on).
+
+    Dixon & Coles (1997), eq. 4, with x = home goals ~ Poisson(lambda) and
+    y = away goals ~ Poisson(mu):
+        tau(0,0) = 1 - lambda*mu*rho     tau(0,1) = 1 + lambda*rho
+        tau(1,0) = 1 + mu*rho            tau(1,1) = 1 - rho
+    i.e. a cell's correction uses the rate of the side that scored 0 — a
+    1-0 home win is the AWAY side's zero, so it scales with `mu`. (Before
+    WP007 this had the two single-goal cells swapped, which makes the joint
+    sum to 1 + rho*(lambda-mu)^2*exp(-lambda-mu) instead of exactly 1: an
+    improper likelihood whenever the two rates differ, i.e. every match.)
     """
     goals_home = pt.as_tensor_variable(goals_home)
     goals_away = pt.as_tensor_variable(goals_away)
@@ -133,9 +157,9 @@ def dixon_coles_tau(lambda_home, lambda_away, goals_home, goals_away, rho):
     return pt.switch(
         is_00, 1 - lambda_home * lambda_away * rho,
         pt.switch(
-            is_10, 1 + lambda_home * rho,
+            is_10, 1 + lambda_away * rho,
             pt.switch(
-                is_01, 1 + lambda_away * rho,
+                is_01, 1 + lambda_home * rho,
                 pt.switch(is_11, 1 - rho, 1.0),
             ),
         ),
@@ -158,3 +182,39 @@ def dixon_coles_adjustment(lambda_home, lambda_away, goals_home, goals_away, sd=
     # is needed — large tau is harmless.
     tau = pt.maximum(tau, 1e-6)
     return pm.Potential("dixon_coles", pt.log(tau).sum())
+
+
+def xg_measurement_channel(
+    lambda_home, lambda_away, xg_home, xg_away,
+    weight=0.5, shape_alpha=2.0, shape_beta=0.5,
+):
+    """Treat each side's realised match xG as a second, noisy measurement of
+    the SAME latent scoring rate that generates its goals (WP007).
+
+    Why not `goals ~ Poisson(xG)` or an xG covariate: within a team-season
+    Var(goals)/Var(xG) is ~2.2x, and xG's CV^2 is ~0.32 — xG is a *smoother*
+    signal of the rate, not a rate whose realisations are Poisson. So it gets
+    its own Gamma observation model with mean `kappa * lambda` and a learned
+    shape `xg_shape` (Var = mean^2 / shape), and it sharpens attack/defence
+    without changing the goals likelihood or the goals predictive. Empirically
+    first-half xG predicts second-half goals better than first-half goals do
+    (r=0.73 vs 0.68 attack, 0.62 vs 0.55 defence), which is exactly what a
+    second measurement channel exploits and the old rolling-mean covariate
+    (beta_xG ~ HalfNormal(0.1), i.e. ~zero weight) could not.
+
+    `weight` tempers the channel's log-density: goals and xG share the same
+    shot-level information, so treating them as fully independent evidence
+    would double-count. 0 disables it; 1 is full trust.
+
+    xg_home/xg_away are the match's OWN realised xG — fine for training rows
+    (an observation), never a predictor for the match being forecast.
+    """
+    xg_home = pt.as_tensor_variable(xg_home)
+    xg_away = pt.as_tensor_variable(xg_away)
+    shape = pm.Gamma("xg_shape", alpha=shape_alpha, beta=shape_beta)
+    kappa = pm.LogNormal("xg_kappa", mu=0.0, sigma=0.1)
+    logp = 0.0
+    for lam, obs in ((lambda_home, xg_home), (lambda_away, xg_away)):
+        gamma = pm.Gamma.dist(alpha=shape, beta=shape / (kappa * lam))
+        logp = logp + pm.logp(gamma, obs).sum()
+    return pm.Potential("xg_channel", weight * logp)
