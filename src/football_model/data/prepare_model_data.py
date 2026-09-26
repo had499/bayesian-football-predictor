@@ -132,6 +132,12 @@ def prepare_model_data(df: pd.DataFrame, max_round, season_start_window: int = 5
         # the odd xG==0.00 row. Not a predictor for the match itself.
         xG_obs_home=np.clip(df_obs["xG_home"].to_numpy(float), 0.02, None).astype("float32"),
         xG_obs_away=np.clip(df_obs["xG_away"].to_numpy(float), 0.02, None).astype("float32"),
+        # WP012 squad-absence covariate; absent if the caller's df doesn't carry it.
+        # df_obs is home-perspective only, so "self" is the home side.
+        absent_home=(df_obs["absent_self"].to_numpy(float).astype("float32")
+                     if "absent_self" in df_obs else np.zeros(len(df_obs), "float32")),
+        absent_away=(df_obs["absent_opp"].to_numpy(float).astype("float32")
+                     if "absent_opp" in df_obs else np.zeros(len(df_obs), "float32")),
         team_mapping=team_idx_map,
         active_mask=active_mask,
         season_start_mask=season_start_mask,

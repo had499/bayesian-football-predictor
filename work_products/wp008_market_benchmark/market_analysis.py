@@ -64,15 +64,20 @@ def add_devig_probs(df, cols, prefix):
     return df
 
 
-def join_market(model_matches, odds_raw):
+def join_market(model_matches, odds_raw, books=None):
     """model_matches: WP007 per-match rows (any arm(s), needs date/home/away/
     result/window/round/goals_home/goals_away). `home`/`away` are Understat's
     3-letter codes (e.g. "ARS") — mapped through CODE_TO_FD to football-data-
     style full names ("Arsenal") before joining, same map WP003/WP007 use.
 
+    `books`: {name: [home_col, draw_col, away_col]} to de-vig; defaults to
+    BOOKS (the closing lines WP008 benchmarks). WP010 passes its own dict to
+    add the pre-closing snapshots — a parameter rather than a mutated global
+    so WP008's own results can't shift underneath it.
+
     Returns (joined, unmatched, mismatched): `joined` is one row per (window,
     round, home, away) — arm-independent — with de-vigged probabilities for
-    every book in BOOKS, restricted to rows whose score MATCHES the odds
+    every book in `books`, restricted to rows whose score MATCHES the odds
     source's own fthg/ftag (a mismatch means the join found the wrong
     fixture, e.g. a postponed/rescheduled date — better to drop it than
     silently mis-score).
@@ -90,7 +95,8 @@ def join_market(model_matches, odds_raw):
     # odds_raw has its own 'season' (football-data.co.uk's "2020-21" style,
     # vs. model_matches' Understat "2020") — keep only what's needed from it
     # to avoid a season_x/season_y collision.
-    odds_cols = ["date", "home_team", "away_team", "fthg", "ftag"] + sum(BOOKS.values(), [])
+    books = BOOKS if books is None else books
+    odds_cols = ["date", "home_team", "away_team", "fthg", "ftag"] + sum(books.values(), [])
     j = ident.merge(odds_raw[odds_cols], left_on=["date", "home_fd", "away_fd"],
                     right_on=["date", "home_team", "away_team"], how="left", indicator=True)
     unmatched = j[j["_merge"] == "left_only"]
@@ -100,7 +106,7 @@ def join_market(model_matches, odds_raw):
     mismatched = j[~score_ok]
     j = j[score_ok].copy()
 
-    for book, cols in BOOKS.items():
+    for book, cols in books.items():
         j = add_devig_probs(j, cols, book)
     return j, unmatched, mismatched
 

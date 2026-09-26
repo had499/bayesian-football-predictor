@@ -56,6 +56,7 @@ def compute_theta(
     use_opponent_adjusted_xG=False,
     xG_adjustment_strength=0.3,
     intercept=0.0,
+    absence_term=0.0,
 ):
     """theta for one side of a match — the team whose goal rate this is.
 
@@ -72,7 +73,7 @@ def compute_theta(
     defense (`defense[team_idx]`), which is exactly what
     `use_opponent_adjusted_xG` adjusts by in build_model.
     """
-    theta = intercept + attack_for - defense_against + home_adv_for * is_home
+    theta = intercept + absence_term + attack_for - defense_against + home_adv_for * is_home
 
     if beta_xG is not None and xG_for is not None:
         if use_opponent_adjusted_xG:
@@ -97,6 +98,8 @@ def predict_match_lambdas(
     use_opponent_adjusted_xG=False,
     xG_adjustment_strength=0.3,
     intercept=0.0,
+    absence_team=0.0,
+    absence_opp=0.0,
 ):
     """Predicted (lambda_team, lambda_opp) goal rates for one match, where
     `team` is always the home side (matches how training data is built —
@@ -114,14 +117,14 @@ def predict_match_lambdas(
         beta_xG=beta_xG, xG_for=xG_team,
         use_opponent_adjusted_xG=use_opponent_adjusted_xG,
         xG_adjustment_strength=xG_adjustment_strength,
-        intercept=intercept,
+        intercept=intercept, absence_term=absence_team,
     )
     theta_opp = compute_theta(
         attack_opp, defense_team, home_adv_for=0.0, is_home=0.0,
         beta_xG=beta_xG, xG_for=xG_opp,
         use_opponent_adjusted_xG=use_opponent_adjusted_xG,
         xG_adjustment_strength=xG_adjustment_strength,
-        intercept=intercept,
+        intercept=intercept, absence_term=absence_opp,
     )
     theta_team = soft_clip(theta_team, clip_theta)
     theta_opp = soft_clip(theta_opp, clip_theta)
@@ -141,6 +144,7 @@ def predict_rows(
     xG_adjustment_strength=0.3,
     max_t=None,
     intercept=0.0,
+    beta_absence=None,
 ):
     """Predicted (lambda_home, lambda_away) for a batch of matches, reading
     every index and xG baseline straight off `model_data` — never rebuild a
@@ -198,6 +202,8 @@ def predict_rows(
         use_opponent_adjusted_xG=use_opponent_adjusted_xG,
         xG_adjustment_strength=xG_adjustment_strength,
         intercept=intercept,
+        absence_team=(beta_absence * model_data.absent_home[idx]) if beta_absence is not None else 0.0,
+        absence_opp=(beta_absence * model_data.absent_away[idx]) if beta_absence is not None else 0.0,
     )
     return lambda_home, lambda_away, idx
 
@@ -447,11 +453,18 @@ def posterior_lambdas(
         def_h[:, j], def_a[:, j] = Df[:, h[j]], Df[:, a[j]]
 
     b0 = post["intercept"][:, None] if "intercept" in post else 0.0
+    if "beta_absence" in post:
+        ba = post["beta_absence"][:, None]
+        abs_h = ba * model_data.absent_home[idx][None, :]
+        abs_a = ba * model_data.absent_away[idx][None, :]
+    else:
+        abs_h = abs_a = 0.0
     home_adv = post["home_adv"][:, h]                                       # (D, M)
     beta = post["beta_xG"][:, None] if "beta_xG" in post else None
     lam_h, lam_a = predict_match_lambdas(
         attack_team=att_h, defense_team=def_h, attack_opp=att_a, defense_opp=def_a,
         home_adv_team=home_adv, clip_theta=clip_theta, intercept=b0,
+        absence_team=abs_h, absence_opp=abs_a,
         beta_xG=beta,
         xG_team=model_data.xG_home[idx][None, :] if beta is not None else None,
         xG_opp=model_data.xG_away[idx][None, :] if beta is not None else None,

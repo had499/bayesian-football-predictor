@@ -37,6 +37,14 @@ class ModelData:
     xG_obs_home: np.ndarray = None        # shape=(n_obs,)
     xG_obs_away: np.ndarray = None        # shape=(n_obs,)
 
+    # --- squad-absence covariate (WP012) ---
+    # Each side's leak-safe "absence drop": the share of its recent xG+xA produced
+    # by players whose availability has fallen below their own norm (WP011). Built
+    # only from matches BEFORE the one being predicted, so it is a legitimate
+    # predictor, not an outcome. Zero where no roster history exists.
+    absent_home: np.ndarray = None        # shape=(n_obs,)
+    absent_away: np.ndarray = None        # shape=(n_obs,)
+
 from dataclasses import dataclass
 
 @dataclass(frozen=True)
@@ -160,4 +168,14 @@ class ModelConfig:
     xg_channel_weight: float = 0.5
     xg_channel_shape_alpha: float = 2.0
     xg_channel_shape_beta: float = 0.5
+
+    # -------------------------
+    # Squad-absence covariate (WP012)
+    # -------------------------
+    # Adds beta_absence * absence to each side's log rate. WP011 found no
+    # CONTEMPORANEOUS correlation between absence and model-minus-market error,
+    # but that test could not see the channel where the feature changes how the
+    # latent strengths are inferred during training — which is what this tests.
+    use_absence: bool = False
+    absence_sd: float = 0.5      # prior scale for beta_absence (expected negative)
 

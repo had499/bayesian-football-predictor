@@ -116,7 +116,8 @@ def run_window(
         )
     n_diverging = int(trace_cv.sample_stats["diverging"].sum())
     scalar_names = [v for v in ("sigma_att", "sigma_def", "home_mu", "intercept", "promo_att",
-                                "promo_def", "xg_shape", "rho_dc", "beta_xG", "rho_att", "rho_def")
+                                "promo_def", "xg_shape", "rho_dc", "beta_xG", "rho_att", "rho_def",
+                                "beta_absence")
                     if v in trace_cv.posterior]
     max_rhat = float(max(
         (float(az.rhat(trace_cv, var_names=[v])[v].max()) for v in scalar_names), default=float("nan")
@@ -174,6 +175,7 @@ def run_window(
             use_opponent_adjusted_xG=config.use_opponent_adjusted_xG,
             xG_adjustment_strength=config.xG_adjustment_strength,
             intercept=float(_post_mean("intercept")) if config.use_intercept else 0.0,
+            beta_absence=float(_post_mean("beta_absence")) if config.use_absence else None,
         )
         probs_cv = np.array([
             dc_outcome_probs(lh, la, rho=rho_dc_mean_cv)
@@ -193,7 +195,7 @@ def run_window(
         # WP007: posterior-averaged, forecast-horizon-aware.
         wanted = ["attack", "defence", "attack_raw", "defence_raw", "home_adv", "sigma_att", "sigma_def",
                   "sigma_att_team", "sigma_def_team", "rho_att", "rho_def", "promo_att", "promo_def",
-                  "att_0", "def_0", "intercept", "beta_xG", "rho_dc"]
+                  "att_0", "def_0", "intercept", "beta_xG", "rho_dc", "beta_absence"]
         post = {}
         for name in wanted:
             if name in trace_cv.posterior:

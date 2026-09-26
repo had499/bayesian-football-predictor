@@ -74,12 +74,14 @@ Interesting wrinkle: **Pinnacle itself is mildly under-confident in the same top
 
 ## Bottom line
 
+**Update (WP010)**: the +0.0055 figure below is measured against the *closing* line, which is set after team news is public. Against Pinnacle's earlier, pre-closing price — the fair benchmark for a model predicting days ahead — `L5_xgchannel`'s gap is **+0.0039**, and only ~29% of the closing-gap is late information. See `work_products/wp010_opening_vs_closing/`.
+
 The xG channel is not cosmetic — it buys real ground against the market, not just against naive. But "32% of the gap, concentrated in 2 of 6 seasons, and the confident-disagreement pattern is untouched" is an honest description of a partial result, not "the model now competes with Pinnacle." The remaining gap is where WP004 already pointed: structural resolution on the matches where the model and the market disagree most, which no amount of recalibration (WP004) or prior-loosening (WP005) reached, and which the WP007 ladder — beyond the xG channel — didn't move either.
 
 ## What this doesn't answer
 
 * **Why does the xG channel help disproportionately in 2021 and 2024?** Not investigated — worth a season-level diagnostic (e.g. was xG's signal-to-noise unusually high or low those seasons, more/fewer upsets, different fixture congestion) before assuming it's the model rather than those two seasons being unusual.
-* **The disagreement-quantile pattern** — same shape as WP003, untouched by WP007's one validated change — is the natural next target, but this work product doesn't diagnose *what specifically* the market sees on those high-disagreement matches that the model doesn't.
+* **The disagreement-quantile pattern** — same shape as WP003, untouched by WP007's one validated change — is the natural next target, but this work product doesn't diagnose *what specifically* the market sees on those high-disagreement matches that the model doesn't. **See WP009** (`work_products/wp009_disagreement_diagnostics/`): the model is measurably less sharp than the market and specifically under-rates away favourites, but post-hoc sharpening doesn't help (it trades non-upset accuracy for upset accuracy at a net wash) — evidence the gap is genuinely missing information, not a fixable calibration artifact.
 * **Betting simulation** (WP003 had one, using market-max odds) — not repeated here; the RPS/calibration answer was the priority and the betting-sim conclusion is unlikely to change materially (the model is still behind the market on the matches that would matter for it).
 * **`market_max`** odds are in `odds_raw.pkl` (fetched, unused) if a future work product wants them.
 

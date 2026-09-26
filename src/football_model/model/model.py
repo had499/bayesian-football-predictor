@@ -233,6 +233,16 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
         else:
             intercept = 0.0
 
+        # --- Optional: squad-absence covariate (WP012) ---
+        if config.use_absence:
+            if data.absent_home is None:
+                raise ValueError("use_absence needs ModelData.absent_home/away")
+            beta_absence = pm.Normal("beta_absence", 0.0, config.absence_sd)
+            absence_home = beta_absence * pm.Data("absent_home", data.absent_home)
+            absence_away = beta_absence * pm.Data("absent_away", data.absent_away)
+        else:
+            absence_home = absence_away = 0.0
+
         # --- Linear predictors ---
         # NOTE: football_model.model.predict has a plain-numpy mirror of this
         # exact formula (compute_theta/predict_match_lambdas), used by both
@@ -242,6 +252,7 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
         # kept in sync by hand. If this formula changes, update that module too.
         theta_home = (
             intercept
+            + absence_home
             + xG_contribution_home
             + attack[data.t_idx, data.team_idx]
             - defense[data.t_idx, data.opp_idx]
@@ -250,6 +261,7 @@ def build_model(data: ModelData , config: ModelConfig = default_config):
 
         theta_away = (
             intercept
+            + absence_away
             + xG_contribution_away
             + attack[data.t_idx, data.opp_idx]
             - defense[data.t_idx, data.team_idx]

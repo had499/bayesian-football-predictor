@@ -2,6 +2,7 @@ import numpy as np
 import pymc as pm
 
 from football_model.model.model import build_model
+from football_model.model.predict import predict_match_lambdas
 from football_model.types.model_data import ModelConfig
 
 
@@ -196,3 +197,46 @@ def test_form_decomposition_rejects_random_walk_options(two_season_model_data):
     except ValueError:
         return
     raise AssertionError("expected ValueError")
+
+
+def test_absence_covariate_registers_and_reaches_lambda(two_season_model_data):
+    """beta_absence must actually move the predicted rate, not just exist."""
+    import dataclasses
+
+    md = dataclasses.replace(
+        two_season_model_data,
+        absent_home=np.full(len(two_season_model_data.goals_home), 0.4, dtype="float32"),
+        absent_away=np.zeros(len(two_season_model_data.goals_home), dtype="float32"),
+    )
+    model = build_model(md, _cfg(use_absence=True))
+    assert "beta_absence" in {rv.name for rv in model.free_RVs}
+    with model:
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+    beta = float(idata.prior["beta_absence"].values[0, 0])
+    lam_h = idata.prior["lambda_home"].values[0, 0]
+    lam_a = idata.prior["lambda_away"].values[0, 0]
+    # home carries absence 0.4, away carries 0 -> the ratio must show exactly exp(beta*0.4)
+    attack = idata.prior["attack"].values[0, 0]
+    defence = idata.prior["defence"].values[0, 0]
+    home_adv = idata.prior["home_adv"].values[0, 0]
+    t, h, a = int(md.t_idx[0]), int(md.team_idx[0]), int(md.opp_idx[0])
+    exp_h, exp_a = predict_match_lambdas(
+        attack[t, h], defence[t, h], attack[t, a], defence[t, a], home_adv[h],
+        clip_theta=_cfg().clip_theta,
+        intercept=0.0, absence_team=beta * 0.4, absence_opp=0.0,
+    )
+    assert np.isclose(lam_h[0], exp_h, rtol=1e-5)
+    assert np.isclose(lam_a[0], exp_a, rtol=1e-5)
+
+
+def test_absence_disabled_by_default_and_errors_without_data(two_season_model_data):
+    import dataclasses
+
+    assert "beta_absence" not in {rv.name for rv in build_model(two_season_model_data, _cfg()).free_RVs}
+    md = dataclasses.replace(two_season_model_data, absent_home=None, absent_away=None)
+    try:
+        build_model(md, _cfg(use_absence=True))
+    except ValueError as e:
+        assert "absent_home" in str(e)
+    else:
+        raise AssertionError("expected ValueError")

@@ -30,7 +30,17 @@ PIN = ["pinnacle_1x2_home_close", "pinnacle_1x2_draw_close", "pinnacle_1x2_away_
 B365 = ["bet365_1x2_home_close", "bet365_1x2_draw_close", "bet365_1x2_away_close"]
 AVG = ["market_avg_1x2_home", "market_avg_1x2_draw", "market_avg_1x2_away"]
 MAX = ["market_max_1x2_home", "market_max_1x2_draw", "market_max_1x2_away"]
-ODDS_COLS = PIN + B365 + AVG + MAX
+
+# Pre-closing ("opening") snapshots — the same books without the `C` infix.
+# WP010 benchmarks against these: a model predicting days ahead cannot see the
+# team news that moves a line in the final hour, so the closing line is an
+# unfairly hard yardstick for it. The mirror's SPEC only documents that `C`
+# means closing and doesn't say when the non-`C` snapshot is taken, so WP010
+# establishes what they are empirically (higher overround + worse RPS than
+# closing = an earlier, less-informed price) rather than trusting a label.
+PIN_OPEN = ["pinnacle_1x2_home", "pinnacle_1x2_draw", "pinnacle_1x2_away"]
+B365_OPEN = ["bet365_1x2_home", "bet365_1x2_draw", "bet365_1x2_away"]
+ODDS_COLS = PIN + B365 + AVG + MAX + PIN_OPEN + B365_OPEN
 
 
 def fetch():
@@ -60,6 +70,7 @@ if __name__ == "__main__":
     df = fetch()
     df.to_pickle(OUT)
     print(f"wrote {OUT}: {len(df)} matches, seasons {df.season.min()}..{df.season.max()}")
-    for name, cols in [("pinnacle", PIN), ("bet365", B365), ("market_avg", AVG), ("market_max", MAX)]:
+    for name, cols in [("pinnacle", PIN), ("bet365", B365), ("market_avg", AVG), ("market_max", MAX),
+                       ("pinnacle_open", PIN_OPEN), ("bet365_open", B365_OPEN)]:
         n = df[cols[0]].notna().sum()
-        print(f"  {name}: {n}/{len(df)} matches have closing odds")
+        print(f"  {name}: {n}/{len(df)} matches have odds")
