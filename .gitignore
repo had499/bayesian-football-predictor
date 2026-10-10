@@ -13,13 +13,18 @@ __pycache__/
 # ---------------------------------------------------------------------------
 /data/
 /services/predictor/data/
-*.pkl                    # pickle is a cache, never an archive (version-fragile)
+# pickle is a cache, never an archive -- it is version-fragile
+*.pkl
 *.nc
-work_products/*/checkpoints/      # 8,219 per-window MCMC pickles -> archive/predictions.parquet
-work_products/*/*.log
+# 8,219 per-window MCMC pickles -> archive/predictions.parquet
+work_products/*/checkpoints/
+# logs are never worth tracking, at any depth
+*.log
 work_products/.sweep_status/
 work_products/wp014_npxg_decomposition/shots/
 work_products/wp011_squad_instability/rosters/
+# 11MB CSV, archived as archive/raw/elo_ratings.parquet (0.8MB)
+work_products/wp025_elo_channel/elo_ratings.csv
 
 # ---------------------------------------------------------------------------
 # The archive IS tracked. Parquet is columnar, compressed and stable across
@@ -31,3 +36,6 @@ work_products/wp011_squad_instability/rosters/
 # ---------------------------------------------------------------------------
 !archive/
 !archive/**
+
+# machine-local Claude Code settings (settings.json is the shared one)
+.claude/settings.local.json

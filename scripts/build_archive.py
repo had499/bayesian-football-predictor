@@ -39,12 +39,14 @@ RAW = [
     ("wp044_league_scan/odds_all_leagues.pkl",    "odds_all_leagues.parquet", "dict"),
     ("wp025_elo_channel/elo_ratings.csv",         "elo_ratings.parquet",    "csv"),
 ]
-# text sources: already small and diffable, copied verbatim rather than converted
-JSONS = [
-    ("wp059_injuries/injuries.json", "injuries.json"),
-    ("wp059_injuries/squads.json",   "squads.json"),
-    ("wp065_market_value/values.json", "market_values.json"),
-]
+# The scraped JSON is NOT copied here. It is already small, text and diffable, so Parquet
+# buys nothing -- and a second copy in archive/ would be two sources that silently drift.
+# It is tracked where the scrapers write it:
+#   work_products/wp059_injuries/{injuries,squads}.json
+#   work_products/wp065_market_value/values.json
+# The rule this file follows: BULKY OR FRAGILE formats get converted and the original is
+# gitignored; SMALL TEXT stays tracked at source with no duplicate.
+JSONS = []
 
 
 def _stringify(df):

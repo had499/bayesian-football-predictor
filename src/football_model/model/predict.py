@@ -37,7 +37,7 @@ WP002 notebooks) must route through instead of re-deriving tau by hand, so
 this exact gap can't reopen in a second place the way the xG one did.
 """
 import numpy as np
-from scipy.stats import poisson
+from scipy.stats import nbinom, poisson
 
 
 def soft_clip(x, limit=2.0):
@@ -131,6 +131,27 @@ def predict_match_lambdas(
     return np.exp(theta_team), np.exp(theta_opp)
 
 
+from football_model.model.components import avail_offset_terms  # noqa: E402
+
+
+def _avail_offset(model_data, idx, avail_k, side):
+    """Numpy mirror of build_model's avail_h / avail_a (WP061).
+
+    Delegates to the SHARED `avail_offset_terms` that build_model uses, so there is one
+    implementation rather than two hand-synced ones. Returns 0.0 when the arm is off or
+    the data is absent, so an arm without availability behaves exactly as before.
+    """
+    if avail_k is None:
+        return 0.0
+    oh, oa = model_data.avail_out_h, model_data.avail_out_a
+    if oh is None or oa is None:
+        return 0.0
+    h = np.nan_to_num(np.asarray(oh, dtype=float)[idx])
+    a = np.nan_to_num(np.asarray(oa, dtype=float)[idx])
+    off_h, off_a = avail_offset_terms(h, a, float(avail_k), np.log)
+    return off_h if side == "h" else off_a
+
+
 def predict_rows(
     model_data,
     row_indices,
@@ -145,6 +166,10 @@ def predict_rows(
     max_t=None,
     intercept=0.0,
     beta_absence=None,
+    avail_k=None,
+    level_t=None,
+    hfa_t=None,
+    home_adv_dev=None,
 ):
     """Predicted (lambda_home, lambda_away) for a batch of matches, reading
     every index and xG baseline straight off `model_data` — never rebuild a
@@ -183,18 +208,29 @@ def predict_rows(
     model_data with the same positions, instead of re-deriving them.
     """
     idx = np.asarray(row_indices)
-    t = model_data.t_idx[idx].astype(int)
+    t = model_data.t_walk[idx].astype(int)
     if max_t is not None:
         t = np.minimum(t, max_t)
+    # WP015: a drifting global level / home advantage is read at this row's own t
+    # (capped the same way the latents are), so the time-varying value actually
+    # reaches the prediction instead of silently falling back to a constant.
+    if level_t is not None:
+        intercept = np.asarray(level_t)[t]
     team = model_data.team_idx[idx].astype(int)
     opp = model_data.opp_idx[idx].astype(int)
+
+    if hfa_t is not None:
+        dev = np.zeros_like(np.asarray(hfa_t)[t]) if home_adv_dev is None else np.asarray(home_adv_dev)[team]
+        home_adv_for_row = np.asarray(hfa_t)[t] + dev
+    else:
+        home_adv_for_row = home_adv[team]
 
     lambda_home, lambda_away = predict_match_lambdas(
         attack_team=attack[t, team],
         defense_team=defense[t, team],
         attack_opp=attack[t, opp],
         defense_opp=defense[t, opp],
-        home_adv_team=home_adv[team],
+        home_adv_team=home_adv_for_row,
         clip_theta=clip_theta,
         beta_xG=beta_xG,
         xG_team=model_data.xG_home[idx] if beta_xG is not None else None,
@@ -202,8 +238,14 @@ def predict_rows(
         use_opponent_adjusted_xG=use_opponent_adjusted_xG,
         xG_adjustment_strength=xG_adjustment_strength,
         intercept=intercept,
-        absence_team=(beta_absence * model_data.absent_home[idx]) if beta_absence is not None else 0.0,
-        absence_opp=(beta_absence * model_data.absent_away[idx]) if beta_absence is not None else 0.0,
+        # WP061: the availability offset is ADDED into the absence slot -- both are plain
+        # additive terms on theta, so summing them here is exactly build_model's
+        # `+ avail_h + ... + absence_home`. Kept in the same slot to avoid a second
+        # hand-synced parameter between this module and model.py.
+        absence_team=((beta_absence * model_data.absent_home[idx]) if beta_absence is not None else 0.0)
+                     + _avail_offset(model_data, idx, avail_k, side="h"),
+        absence_opp=((beta_absence * model_data.absent_away[idx]) if beta_absence is not None else 0.0)
+                    + _avail_offset(model_data, idx, avail_k, side="a"),
     )
     return lambda_home, lambda_away, idx
 
@@ -251,7 +293,23 @@ def dixon_coles_log_correction(lambda_home, lambda_away, goals_home, goals_away,
     return np.log(np.maximum(tau, 1e-6))
 
 
-def scoreline_grid(lambda_home, lambda_away, rho=None, max_goals=10):
+def _goal_pmf(k, lam, alpha=None):
+    """P(goals = k) for rate `lam`. Poisson unless `alpha` is given, in which case
+    NegBinomial with mean `lam` and dispersion `alpha` (Var = lam + lam^2/alpha).
+
+    WP028 needs this: if the LIKELIHOOD is overdispersed but the PREDICTIVE stays
+    Poisson, the arm measures nothing -- the whole point of stakes-dependent
+    dispersion is that a dead rubber should get FLATTER outcome probabilities.
+    alpha -> inf recovers Poisson exactly.
+    """
+    if alpha is None:
+        return poisson.pmf(k, lam)
+    a = np.asarray(alpha, dtype=float)
+    return nbinom.pmf(k, a, a / (a + lam))
+
+
+def scoreline_grid(lambda_home, lambda_away, rho=None, max_goals=10,
+                   alpha_home=None, alpha_away=None):
     """Joint scoreline probabilities P(home=i, away=j) on a (max_goals+1)^2
     grid, optionally Dixon-Coles corrected, renormalised over the grid.
 
@@ -264,8 +322,10 @@ def scoreline_grid(lambda_home, lambda_away, rho=None, max_goals=10):
     goals = np.arange(max_goals + 1)
     lh = np.asarray(lambda_home, dtype=float)[..., None, None]
     la = np.asarray(lambda_away, dtype=float)[..., None, None]
-    ph = poisson.pmf(goals[:, None], lh)     # (..., G, 1) — home goals i
-    pa = poisson.pmf(goals[None, :], la)     # (..., 1, G) — away goals j
+    ah = None if alpha_home is None else np.asarray(alpha_home, float)[..., None, None]
+    aa = None if alpha_away is None else np.asarray(alpha_away, float)[..., None, None]
+    ph = _goal_pmf(goals[:, None], lh, ah)   # (..., G, 1) — home goals i
+    pa = _goal_pmf(goals[None, :], la, aa)   # (..., 1, G) — away goals j
     grid = ph * pa
 
     if rho is not None:
@@ -286,7 +346,8 @@ def grid_outcome_probs(grid):
     return np.stack([p_home, p_draw, p_away], axis=-1)
 
 
-def dc_outcome_probs(lambda_home, lambda_away, rho=None, max_goals=10):
+def dc_outcome_probs(lambda_home, lambda_away, rho=None, max_goals=10,
+                     alpha_home=None, alpha_away=None):
     """Home/draw/away win probabilities from Poisson goal-rate parameters,
     via exact convolution over the scoreline grid — optionally with the
     Dixon-Coles correction applied to the four cells it affects before
@@ -301,7 +362,8 @@ def dc_outcome_probs(lambda_home, lambda_away, rho=None, max_goals=10):
     here regardless of rho is exactly the evaluation gap this function
     exists to close.
     """
-    p = grid_outcome_probs(scoreline_grid(lambda_home, lambda_away, rho, max_goals))
+    p = grid_outcome_probs(scoreline_grid(lambda_home, lambda_away, rho, max_goals,
+                                          alpha_home, alpha_away))
     return p[..., 0], p[..., 1], p[..., 2]
 
 
@@ -424,7 +486,7 @@ def posterior_lambdas(
     post = {k: np.asarray(v)[keep] for k, v in posterior.items()}
     D = len(keep)
 
-    t = model_data.t_idx[idx].astype(int)
+    t = model_data.t_walk[idx].astype(int)
     h = model_data.team_idx[idx].astype(int)
     a = model_data.opp_idx[idx].astype(int)
     rng = np.random.default_rng(seed)
@@ -460,11 +522,29 @@ def posterior_lambdas(
     else:
         abs_h = abs_a = 0.0
     home_adv = post["home_adv"][:, h]                                       # (D, M)
+    # WP054: the GBM correction IS knowable in advance (it is built from strictly
+    # earlier matches), so predict.py MIRRORS it -- unlike WP030's intactness, which
+    # needs the priced match's own team sheet and is deliberately omitted.
+    gbm_h = gbm_a = 0.0
+    if "gbm_beta" in post and getattr(model_data, "gbm_z_home", None) is not None:
+        bg = post["gbm_beta"][:, None]
+        gbm_h = bg * model_data.gbm_z_home[idx][None, :]
+        gbm_a = bg * model_data.gbm_z_away[idx][None, :]
+    # WP031: crowdless-match shift. MIRRORED here (unlike WP030's intactness) because
+    # whether a match is behind closed doors is a scheduling fact known months ahead,
+    # so it is available at the opening price. Rides inside home_adv, which is already
+    # multiplied by is_home -- exactly where build_model puts it.
+    if "crowd_hfa" in post and getattr(model_data, "crowdless", None) is not None:
+        home_adv = home_adv + post["crowd_hfa"][:, None] * model_data.crowdless[idx][None, :]
     beta = post["beta_xG"][:, None] if "beta_xG" in post else None
     lam_h, lam_a = predict_match_lambdas(
         attack_team=att_h, defense_team=def_h, attack_opp=att_a, defense_opp=def_a,
         home_adv_team=home_adv, clip_theta=clip_theta, intercept=b0,
-        absence_team=abs_h, absence_opp=abs_a,
+        # NOTE: the GBM term rides in the `absence_term` slot because compute_theta
+        # adds that straight onto theta (`theta = intercept + absence_term + ...`),
+        # which is exactly where a log-rate correction belongs. Not a semantic
+        # claim about absence -- it is the generic additive-on-theta channel here.
+        absence_team=abs_h + gbm_h, absence_opp=abs_a + gbm_a,
         beta_xG=beta,
         xG_team=model_data.xG_home[idx][None, :] if beta is not None else None,
         xG_opp=model_data.xG_away[idx][None, :] if beta is not None else None,

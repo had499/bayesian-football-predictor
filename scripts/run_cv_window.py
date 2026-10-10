@@ -87,12 +87,14 @@ def run_window(
     tune: int = 2000,
     chains: int = 3,
     target_accept: float = 0.95,
+    chain_method: str = "parallel",
+    time_grid_step: int = 1,
+    nuts_sampler: str = "numpyro",
+    elo_z_grid=None,
 ):
     if predict_mode not in ("plugin", "posterior"):
         raise ValueError(f"predict_mode must be 'plugin' or 'posterior', got {predict_mode!r}")
     t_start = time.time()
-    train_data = prepare_model_data(df_cv, max_round=window["train_end"])
-
     config_overrides = _validate_config_overrides(dict(config_overrides or {}))
     # Overrides win over the harness defaults (previously a duplicate key
     # such as center_team_strength raised a TypeError instead).
@@ -101,6 +103,16 @@ def run_window(
         "use_dixon_coles": use_dc, "use_xG": use_xg,
         **config_overrides,
     })
+
+    # WP034: config.season_start_window was DEAD -- declared on ModelConfig but never
+    # read, so prepare_model_data used its own default of 5 and setting it in a
+    # --config-json did nothing (the screen read exactly +0.00000 for both 3 and 8).
+    # Both defaults are 5, so wiring it is behaviour-preserving for every past result.
+    # MUST come after `config` is built -- an earlier version of this call sat above
+    # the ModelConfig(...) line and raised UnboundLocalError on every window.
+    train_data = prepare_model_data(df_cv, max_round=window["train_end"],
+                                    season_start_window=config.season_start_window,
+                                    time_grid_step=time_grid_step, elo_z_grid=elo_z_grid)
     model_cv = build_model(train_data, config)
 
     with model_cv:
@@ -112,12 +124,31 @@ def run_window(
             random_seed=42 + window_num,
             return_inferencedata=True,
             discard_tuned_samples=True,
-            nuts_sampler="numpyro",
+            nuts_sampler=nuts_sampler,
+            **({"nuts_sampler_kwargs": {"chain_method": chain_method}}
+               if nuts_sampler == "numpyro" else {}),
         )
     n_diverging = int(trace_cv.sample_stats["diverging"].sum())
     scalar_names = [v for v in ("sigma_att", "sigma_def", "home_mu", "intercept", "promo_att",
                                 "promo_def", "xg_shape", "rho_dc", "beta_xG", "rho_att", "rho_def",
-                                "beta_absence")
+                                "beta_absence", "sigma_hfa_t", "sigma_level_t", "sigma_stop",
+                                "xg_kappa", "shot_kappa", "shot_alpha",
+                                "deep_kappa", "deep_alpha",
+                                "elo_entry_att", "elo_entry_def",
+                                "elo_anchor_att", "elo_anchor_def",
+                                # WP063: two-timescale latent. Recorded so a sweep can show
+                                # whether ability and form SEPARATED or collapsed onto each
+                                # other -- if they collapse, any RPS gain is not coming from
+                                # the two-timescale structure and must not be read as such.
+                                "sigma_att_ability", "sigma_def_ability",
+                                "sigma_att_form", "sigma_def_form",
+                                "rho_att_ability", "rho_def_ability",
+                                "rho_att_form", "rho_def_form",
+                                "beta_rest", "beta_load",
+                                "stakes_effort", "stakes_disp",
+                                "rest_effort", "load_effort",
+                                "intact_att", "intact_def", "crowd_hfa", "ad_corr",
+                                "mkt_kappa", "mkt_shape", "gbm_beta")
                     if v in trace_cv.posterior]
     max_rhat = float(max(
         (float(az.rhat(trace_cv, var_names=[v])[v].max()) for v in scalar_names), default=float("nan")
@@ -132,14 +163,15 @@ def run_window(
 
     attack_mean_cv = trace_cv.posterior["attack"].mean(dim=["chain", "draw"]).values
     defense_mean_cv = trace_cv.posterior["defence"].mean(dim=["chain", "draw"]).values
-    home_adv_mean_cv = trace_cv.posterior["home_adv"].mean(dim=["chain", "draw"]).values
 
     # If trained with xG (the covariate), predictions must include it too —
     # otherwise attack/defense get scored as if they were the whole story.
     # `full_data` (train+test rounds) gives test rows' t_idx/team_idx/
     # opp_idx/xG/goals straight from prepare_model_data — the one place that
     # owns this bookkeeping (see football_model.model.predict's docstring).
-    full_data = prepare_model_data(df_cv, max_round=window["test_end"])
+    full_data = prepare_model_data(df_cv, max_round=window["test_end"],
+                                   season_start_window=config.season_start_window,
+                                   time_grid_step=time_grid_step, elo_z_grid=elo_z_grid)
     last_t_cv = trace_cv.posterior["attack"].shape[2] - 1
     test_rows = np.where(
         (full_data.t_idx >= window["test_start"]) & (full_data.t_idx <= window["test_end"])
@@ -168,23 +200,51 @@ def run_window(
         beta_xg_mean_cv = float(_post_mean("beta_xG")) if config.use_xG else None
         test_lambda_home_cv, test_lambda_away_cv, _ = predict_rows(
             full_data, test_rows,
-            attack=_post_mean("attack"), defense=_post_mean("defence"), home_adv=_post_mean("home_adv"),
+            attack=_post_mean("attack"), defense=_post_mean("defence"),
+            # with time_varying_hfa the model registers hfa_t + home_adv_dev instead of
+            # a single home_adv, so predict_rows gets those below rather than this
+            home_adv=(_post_mean("home_adv") if not config.time_varying_hfa
+                      else np.zeros(train_data.n_teams)),
             clip_theta=config.clip_theta,
             beta_xG=beta_xg_mean_cv,
             max_t=last_t_cv,
             use_opponent_adjusted_xG=config.use_opponent_adjusted_xG,
             xG_adjustment_strength=config.xG_adjustment_strength,
-            intercept=float(_post_mean("intercept")) if config.use_intercept else 0.0,
+            intercept=float(_post_mean("intercept")) if (config.use_intercept and not config.time_varying_level) else 0.0,
             beta_absence=float(_post_mean("beta_absence")) if config.use_absence else None,
+            avail_k=(config.avail_k if config.use_avail_offset else None),
+            # WP015: drifting level / home advantage, read per row at its own t
+            level_t=_post_mean("level_t") if config.time_varying_level else None,
+            hfa_t=_post_mean("hfa_t") if config.time_varying_hfa else None,
+            home_adv_dev=_post_mean("home_adv_dev") if config.time_varying_hfa else None,
         )
+        # WP028: with stakes-dependent dispersion the PREDICTIVE must be
+        # overdispersed too. An overdispersed likelihood paired with a Poisson
+        # predictive would measure nothing -- flatter probabilities in dead rubbers
+        # IS the mechanism being tested.
+        alpha_cv = None
+        if config.use_stakes_dispersion:
+            b_disp = float(trace_cv.posterior["stakes_disp"].values.mean())
+            sm = full_data.stakes_match[test_rows]
+            alpha_cv = config.stakes_alpha0 * np.exp(b_disp * sm)
+
         probs_cv = np.array([
-            dc_outcome_probs(lh, la, rho=rho_dc_mean_cv)
-            for lh, la in zip(test_lambda_home_cv, test_lambda_away_cv)
+            dc_outcome_probs(lh, la, rho=rho_dc_mean_cv,
+                             alpha_home=None if alpha_cv is None else alpha_cv[i],
+                             alpha_away=None if alpha_cv is None else alpha_cv[i])
+            for i, (lh, la) in enumerate(zip(test_lambda_home_cv, test_lambda_away_cv))
         ])
-        ll_match_cv = (
-            poisson.logpmf(test_goals_home_cv.astype(int), test_lambda_home_cv)
-            + poisson.logpmf(test_goals_away_cv.astype(int), test_lambda_away_cv)
-        )
+        if alpha_cv is None:
+            ll_match_cv = (
+                poisson.logpmf(test_goals_home_cv.astype(int), test_lambda_home_cv)
+                + poisson.logpmf(test_goals_away_cv.astype(int), test_lambda_away_cv)
+            )
+        else:
+            from scipy.stats import nbinom
+            def _nb(k, mu, a):
+                return nbinom.logpmf(k, a, a / (a + mu))
+            ll_match_cv = (_nb(test_goals_home_cv.astype(int), test_lambda_home_cv, alpha_cv)
+                           + _nb(test_goals_away_cv.astype(int), test_lambda_away_cv, alpha_cv))
         if use_dc:
             # same log(tau) correction dixon_coles_adjustment adds in training
             ll_match_cv = ll_match_cv + dixon_coles_log_correction(
@@ -195,7 +255,8 @@ def run_window(
         # WP007: posterior-averaged, forecast-horizon-aware.
         wanted = ["attack", "defence", "attack_raw", "defence_raw", "home_adv", "sigma_att", "sigma_def",
                   "sigma_att_team", "sigma_def_team", "rho_att", "rho_def", "promo_att", "promo_def",
-                  "att_0", "def_0", "intercept", "beta_xG", "rho_dc", "beta_absence"]
+                  "att_0", "def_0", "intercept", "beta_xG", "rho_dc", "beta_absence",
+                  "level_t", "hfa_t", "home_adv_dev"]
         post = {}
         for name in wanted:
             if name in trace_cv.posterior:
@@ -310,6 +371,23 @@ def main():
     parser.add_argument("--tune", type=int, default=2000)
     parser.add_argument("--chains", type=int, default=3)
     parser.add_argument("--target-accept", type=float, default=0.95)
+    # WP023: how numpyro runs the chains. "parallel" (the default) is what every
+    # result up to WP022 used, so adding this flag cannot change any existing
+    # comparison -- a caller that does not pass it behaves identically. That
+    # matters because a sweep spawns a fresh subprocess per window, so changing
+    # the DEFAULT mid-sweep would silently split one sweep into two sampler
+    # regimes and make its arms non-comparable.
+    # "vectorized" vmaps all chains into a single kernel instead of running them
+    # as competing processes, which avoids oversubscription (4 workers x 4 chains
+    # = 16 compute streams on 6 performance cores).
+    parser.add_argument("--chain-method", choices=["parallel", "vectorized", "sequential"],
+                        default="parallel")
+    # WP023: coarsen the latent walk's time grid. 1 (default) = unchanged.
+    parser.add_argument("--time-grid-step", type=int, default=1)
+    # WP023: NUTS backend. "numpyro" (the default) is what every result to date used.
+    # "nutpie" is a Rust implementation that is ~2x faster in wall-clock but returns
+    # fewer effective samples per draw, so it is NOT a free swap -- see PERFORMANCE.md.
+    parser.add_argument("--nuts-sampler", choices=["numpyro", "nutpie"], default="numpyro")
     args = parser.parse_args()
 
     config_overrides = _validate_config_overrides(json.loads(args.config_json))
@@ -329,6 +407,8 @@ def main():
         df_cv, window, args.window_index, use_xg=args.use_xg, use_dc=args.use_dc,
         config_overrides=config_overrides, predict_mode=args.predict_mode,
         draws=args.draws, tune=args.tune, chains=args.chains, target_accept=args.target_accept,
+        chain_method=args.chain_method, time_grid_step=args.time_grid_step,
+        nuts_sampler=args.nuts_sampler, elo_z_grid=shared.get("elo_z_grid"),
     )
     print(
         f"[window {args.window_index}] MAE={result['mae']:.3f} "

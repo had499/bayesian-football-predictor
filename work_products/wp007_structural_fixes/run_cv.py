@@ -25,7 +25,9 @@ import pandas as pd
 WP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = WP_DIR.parents[1]
 sys.path.insert(0, str(WP_DIR))
-from arms import ARMS, SAMPLER  # noqa: E402
+sys.path.insert(0, str(HERE.parent))
+from notify import done as _notify_done  # noqa: E402
+from arms import ARMS, SAMPLER_LEGACY as SAMPLER  # noqa: E402
 
 DATA_PATH = WP_DIR / "cv_shared_data.pkl"
 CKPT_DIR = WP_DIR / "checkpoints"
@@ -137,6 +139,8 @@ def main():
             failed += status.startswith("FAILED")
             print(f"[{done}/{len(tasks)}] {arm} w{w:03d}: {status} ({secs:.0f}s)  elapsed {(time.time()-t0)/60:.0f}m", flush=True)
     print(f"finished: {done - failed} ok/cached, {failed} failed")
+    _notify_done(HERE.name, f"{done - failed}/{len(tasks)} fits ok, {failed} failed, "
+                            f"{(time.time()-t0)/60:.0f}m")
 
 
 if __name__ == "__main__":

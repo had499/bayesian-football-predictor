@@ -1,5 +1,6 @@
 import numpy as np
 import pymc as pm
+import pytensor.tensor as pt
 
 from football_model.model.model import build_model
 from football_model.model.predict import predict_match_lambdas
@@ -240,3 +241,196 @@ def test_absence_disabled_by_default_and_errors_without_data(two_season_model_da
         assert "absent_home" in str(e)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_npxg_is_used_for_the_channel_when_present(engineered_two_season_df):
+    """If the df carries npxg_home/away, the measurement channel must observe
+    THOSE, not raw xG — otherwise the whole point of WP014 is silently lost."""
+    from football_model.data.prepare_model_data import prepare_model_data
+
+    df = engineered_two_season_df.copy()
+    df["npxg_home"] = df["xG_home"] * 0.5      # deliberately distinguishable
+    df["npxg_away"] = df["xG_away"] * 0.5
+    md = prepare_model_data(df, max_round=df["round"].max())
+    md_raw = prepare_model_data(engineered_two_season_df, max_round=df["round"].max())
+    assert np.allclose(md.xG_obs_home, np.clip(md_raw.xG_obs_home * 0.5, 0.02, None))
+    # the rolling-baseline xG covariate must be untouched by this
+    assert np.allclose(md.xG_home, md_raw.xG_home)
+
+
+def test_season_idx_is_chronological_and_covers_every_row(engineered_two_season_df):
+    from football_model.data.prepare_model_data import prepare_model_data
+
+    md = prepare_model_data(engineered_two_season_df, max_round=engineered_two_season_df["round"].max())
+    assert md.season_idx is not None and len(md.season_idx) == len(md.goals_home)
+    assert md.season_idx.min() == 0 and md.n_seasons == md.season_idx.max() + 1
+    assert md.n_seasons == 2                      # fixture has seasons 2023, 2024
+    # earlier season must get the lower code
+    assert md.season_idx[0] <= md.season_idx[-1]
+
+
+def test_season_varying_kappa_registers_per_season_values(two_season_model_data):
+    config = _cfg(use_xg_channel=True, xg_kappa_by_season=True)
+    model = build_model(two_season_model_data, config)
+    free = {rv.name for rv in model.free_RVs}
+    assert {"xg_kappa_mu", "xg_kappa_tau", "xg_kappa_z"} <= free
+    assert "xg_kappa" not in free                 # the single global value is replaced
+    with model:
+        idata = pm.sample_prior_predictive(draws=2, random_seed=0)
+    ks = idata.prior["xg_kappa_season"].values
+    assert ks.shape[-1] == two_season_model_data.n_seasons
+    assert (ks > 0).all()
+
+
+def test_global_kappa_still_the_default(two_season_model_data):
+    free = {rv.name for rv in build_model(two_season_model_data, _cfg(use_xg_channel=True)).free_RVs}
+    assert "xg_kappa" in free and "xg_kappa_z" not in free
+
+
+def test_time_varying_hfa_and_level_register_walks_and_reach_lambda(two_season_model_data):
+    md = two_season_model_data
+    config = ModelConfig(center_team_strength=True, use_xg_channel=False,
+                         time_varying_hfa=True, time_varying_level=True)
+    model = build_model(md, config)
+    free = {rv.name for rv in model.free_RVs}
+    det = {d.name for d in model.deterministics}
+    assert {"hfa_t_z", "level_t_z", "sigma_hfa_t", "sigma_level_t"} <= free
+    assert {"hfa_t", "level_t", "home_adv_dev"} <= det
+    assert "intercept" not in free          # replaced by the drifting level
+
+    with model:
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+    hfa_t = idata.prior["hfa_t"].values[0, 0]
+    level_t = idata.prior["level_t"].values[0, 0]
+    dev = idata.prior["home_adv_dev"].values[0, 0]
+    attack = idata.prior["attack"].values[0, 0]
+    defence = idata.prior["defence"].values[0, 0]
+    assert len(hfa_t) == md.n_time and len(level_t) == md.n_time
+
+    row = 3
+    t, h, a = int(md.t_idx[row]), int(md.team_idx[row]), int(md.opp_idx[row])
+    exp_h, exp_a = predict_match_lambdas(
+        attack[t, h], defence[t, h], attack[t, a], defence[t, a],
+        hfa_t[t] + dev[h], clip_theta=config.clip_theta, intercept=level_t[t],
+    )
+    assert np.isclose(idata.prior["lambda_home"].values[0, 0][row], exp_h, rtol=1e-5)
+    assert np.isclose(idata.prior["lambda_away"].values[0, 0][row], exp_a, rtol=1e-5)
+
+
+def test_time_varying_level_rejects_soft_centering_and_season_kappa(two_season_model_data):
+    for kw, msg in [(dict(center_team_strength=False, soft_center_team_strength=True), "hard centering"),
+                    (dict(center_team_strength=True, use_xg_channel=True, xg_kappa_by_season=True), "collinear")]:
+        try:
+            build_model(two_season_model_data, ModelConfig(time_varying_level=True, **kw))
+        except ValueError as e:
+            assert msg in str(e)
+        else:
+            raise AssertionError(f"expected ValueError containing {msg!r}")
+
+
+def test_global_walk_is_flat_when_sigma_is_zero():
+    from football_model.model.components import global_walk
+
+    with pm.Model():
+        global_walk("w", 12, sigma_scale=1e-9, init_mu=0.25, init_sd=1e-9)
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+    w = idata.prior["w"].values[0, 0]
+    assert len(w) == 12 and np.allclose(w, w[0], atol=1e-5) and np.isclose(w[0], 0.25, atol=1e-3)
+
+
+def test_split_defence_registers_two_latents_and_keeps_defence_meaning(two_season_model_data):
+    """`defence` must stay = suppression + stopping so every downstream consumer
+    (predict.py, the harness, the service) is unaffected by the split."""
+    config = _cfg(use_xg_channel=True, split_defence=True)
+    model = build_model(two_season_model_data, config)
+    assert "sigma_stop" in {rv.name for rv in model.free_RVs}
+    det = {d.name for d in model.deterministics}
+    assert {"suppress", "defence", "stop_rw", "lambda_xg_home", "lambda_xg_away"} <= det
+
+    with model:
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+    defence = idata.prior["defence"].values[0, 0]
+    suppress = idata.prior["suppress"].values[0, 0]
+    stop = idata.prior["stop_rw"].values[0, 0]
+    # uncentred config: defence is exactly suppression + stopping
+    assert np.allclose(defence, suppress + stop, atol=1e-5)
+
+
+def test_split_defence_xg_channel_sees_suppression_only(two_season_model_data):
+    """The identification strategy: the xG rate must exclude shot-stopping while
+    the goals rate includes it. If both saw the same rate the latents collapse."""
+    md = two_season_model_data
+    # clip_theta wide so soft_clip's tanh is effectively the identity — otherwise the
+    # two rates are each clipped non-linearly and the exact additive relation is hidden
+    model = build_model(md, _cfg(use_xg_channel=True, split_defence=True, clip_theta=1e6))
+    with model:
+        idata = pm.sample_prior_predictive(draws=1, random_seed=0)
+    p = idata.prior
+    stop = p["stop_rw"].values[0, 0]
+    lam_g = p["lambda_away"].values[0, 0]      # away goals: conceded by the HOME team
+    lam_x = p["lambda_xg_away"].values[0, 0]
+    # ratio must be exp(stopping of the conceding side) — here the home team
+    ratio = np.log(lam_x / lam_g)
+    expected = stop[md.t_idx.astype(int), md.team_idx.astype(int)]
+    assert np.allclose(ratio, expected, atol=1e-4), "xG rate must differ from goals rate by exactly stopping"
+    assert not np.allclose(stop, 0.0), "stopping latent should be non-zero in a prior draw"
+
+
+def test_split_defence_requires_the_xg_channel(two_season_model_data):
+    try:
+        build_model(two_season_model_data, _cfg(split_defence=True, use_xg_channel=False))
+    except ValueError as e:
+        assert "use_xg_channel" in str(e)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_split_defence_off_by_default_leaves_model_unchanged(two_season_model_data):
+    model = build_model(two_season_model_data, _cfg(use_xg_channel=True))
+    assert "sigma_stop" not in {rv.name for rv in model.free_RVs}
+    assert "lambda_xg_home" not in {d.name for d in model.deterministics}
+
+
+def test_outcome_likelihood_matches_the_numpy_scoreline_grid(two_season_model_data):
+    """The Potential must equal weight * sum(log P(observed outcome)) computed
+    from predict.py's own grid — otherwise training optimises something other
+    than what we score."""
+    from football_model.model.components import outcome_likelihood
+    from football_model.model.predict import dc_outcome_probs
+
+    lam_h = np.array([1.4, 0.8, 2.2])
+    lam_a = np.array([1.1, 1.6, 0.7])
+    gh = np.array([2, 0, 1]); ga = np.array([1, 1, 1])     # H, A, D
+    with pm.Model():
+        pot = outcome_likelihood(pt.as_tensor_variable(lam_h), pt.as_tensor_variable(lam_a),
+                                 gh, ga, weight=0.5, max_goals=10)
+        actual = float(pot.eval())
+    want = 0.0
+    for i, (h, a) in enumerate(zip(lam_h, lam_a)):
+        ph, pdw, pa = dc_outcome_probs(h, a, max_goals=10)
+        want += np.log([ph, pdw, pa][[0, 2, 1][i]])
+    assert np.isclose(actual, 0.5 * want, rtol=1e-6)
+
+
+def test_outcome_likelihood_weight_zero_is_a_noop(two_season_model_data):
+    from football_model.model.components import outcome_likelihood
+
+    with pm.Model():
+        pot = outcome_likelihood(pt.as_tensor_variable(np.array([1.4])),
+                                 pt.as_tensor_variable(np.array([1.1])),
+                                 np.array([1]), np.array([0]), weight=0.0)
+        assert np.isclose(float(pot.eval()), 0.0)
+
+
+def test_outcome_likelihood_registers_and_samples(two_season_model_data):
+    config = _cfg(use_xg_channel=True, use_outcome_likelihood=True, outcome_weight=1.0)
+    model = build_model(two_season_model_data, config)
+    assert "outcome_likelihood" in [p.name for p in model.potentials]
+    with model:
+        trace = pm.sample(draws=3, tune=3, chains=1, cores=1, progressbar=False, random_seed=0)
+    assert np.isfinite(trace.posterior["lambda_home"].values).all()
+
+
+def test_outcome_likelihood_off_by_default(two_season_model_data):
+    model = build_model(two_season_model_data, _cfg(use_xg_channel=True))
+    assert "outcome_likelihood" not in [p.name for p in model.potentials]

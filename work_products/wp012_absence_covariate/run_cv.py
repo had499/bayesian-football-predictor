@@ -19,7 +19,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(HERE.parent / "wp007_structural_fixes"))
-from arms import ARMS, SAMPLER  # noqa: E402
+sys.path.insert(0, str(HERE.parent))
+from notify import done as _notify_done  # noqa: E402
+from arms import ARMS, SAMPLER_LEGACY as SAMPLER  # noqa: E402
 
 DATA = HERE / "cv_shared_data_absence.pkl"
 CKPT = HERE / "checkpoints"
@@ -67,6 +69,8 @@ def main():
             failed += status.startswith("FAILED")
             print(f"[{done}/{n}] w{w:03d}: {status} ({secs:.0f}s)  elapsed {(time.time()-t0)/60:.0f}m", flush=True)
     print(f"finished: {done - failed} ok/cached, {failed} failed")
+    _notify_done(HERE.name, f"{done - failed}/{len(tasks)} fits ok, {failed} failed, "
+                            f"{(time.time()-t0)/60:.0f}m")
 
 
 if __name__ == "__main__":

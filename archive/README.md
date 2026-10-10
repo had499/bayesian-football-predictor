@@ -33,9 +33,16 @@ measured and wrong.
 | `raw/odds_totals_ah.parquet` | 12,704 | O/U 2.5 and Asian handicap, open + close |
 | `raw/odds_all_leagues.parquet` | 19,837 | five leagues incl. match stats; `__source` names the league |
 | `raw/elo_ratings.parquet` | 273,972 | club Elo time series |
-| `raw/injuries.json` | 16,808 spells | Transfermarkt dated injury spells, 2,989 players |
-| `raw/squads.json` | 10 seasons | Transfermarkt squad rosters with player ids |
-| `raw/market_values.json` | 7,139 | Transfermarkt player-season market values |
+
+The scraped Transfermarkt JSON is **not duplicated here**. It is small, text and diffable, so
+Parquet buys nothing and a second copy would be two sources that drift. It is tracked where
+the scrapers write it: `work_products/wp059_injuries/{injuries,squads}.json` (16,808 spells,
+2,989 players) and `work_products/wp065_market_value/values.json` (7,139 player-seasons).
+
+**The rule:** bulky or fragile formats are converted here and the original is gitignored;
+small text stays tracked at source. So `elo_ratings.csv` (11MB) is ignored in favour of
+`raw/elo_ratings.parquet` (0.8MB), and the pickles are ignored in favour of the two
+checkpoint Parquets.
 
 ## Loading
 

@@ -26,6 +26,16 @@ CODE_TO_FD = {
     "MUN": "Man United", "NEW": "Newcastle", "NOR": "Norwich", "NOT": "Nott'm Forest",
     "SHE": "Sheffield United", "SOU": "Southampton", "SUN": "Sunderland", "TOT": "Tottenham",
     "WAT": "Watford", "WBA": "West Brom", "WHU": "West Ham", "WOL": "Wolves",
+    # WP021: clubs relegated before 2020, needed once the CV grid extends back to
+    # 2016. Pure additions — no existing key changes, so WP003/WP007/WP008 results
+    # are untouched. Names verified against the odds file's own spellings.
+    "CAR": "Cardiff",
+    "HUD": "Huddersfield",
+    "HUL": "Hull",
+    "MID": "Middlesbrough",
+    "QPR": "QPR",
+    "STO": "Stoke",
+    "SWA": "Swansea",
 }
 
 
