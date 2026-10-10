@@ -4,12 +4,30 @@ __pycache__/
 *.DS_Store
 *.egg-info/
 .pytest_cache/
+.certs/
 
-# Model artifacts - too large for git
+# ---------------------------------------------------------------------------
+# Working caches: regenerable, version-fragile, or huge. NOT the record.
+# The durable record of all of this lives in archive/ as Parquet + JSON,
+# built and fidelity-checked by scripts/build_archive.py.
+# ---------------------------------------------------------------------------
 /data/
 /services/predictor/data/
-*.pkl
+*.pkl                    # pickle is a cache, never an archive (version-fragile)
 *.nc
-`# WP007 sweep artefacts (per-window checkpoints + logs; regenerable via run_cv.py)
-work_products/wp007_structural_fixes/checkpoints/
-work_products/wp007_structural_fixes/*.log
+work_products/*/checkpoints/      # 8,219 per-window MCMC pickles -> archive/predictions.parquet
+work_products/*/*.log
+work_products/.sweep_status/
+work_products/wp014_npxg_decomposition/shots/
+work_products/wp011_squad_instability/rosters/
+
+# ---------------------------------------------------------------------------
+# The archive IS tracked. Parquet is columnar, compressed and stable across
+# library versions; the scraped JSON is text and diffable. 105.8MB of pickles
+# compress to 23.9MB here, so the expensive-to-recreate artefacts fit in git:
+#   * 8,219 MCMC checkpoints  = 150+ hours of sampling
+#   * Transfermarkt scrapes   = ~2,700 requests against a third party that can
+#                               restructure or block at any time (unrecoverable)
+# ---------------------------------------------------------------------------
+!archive/
+!archive/**
